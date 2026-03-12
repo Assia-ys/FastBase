@@ -5,36 +5,54 @@
 	<parent>
 		<groupId>org.springframework.boot</groupId>
 		<artifactId>spring-boot-starter-parent</artifactId>
-		<version>4.0.2</version>
+		<version>3.3.5</version>
 		<relativePath/> <!-- lookup parent from repository -->
 	</parent>
-	<groupId>com.example</groupId>
-	<artifactId>demo</artifactId>
+	<groupId>com.fastbase</groupId>
+	<artifactId>fastbase</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
-	<name>demo</name>
-	<description>Demo project for Spring Boot</description>
-	<url/>
-	<licenses>
-		<license/>
-	</licenses>
-	<developers>
-		<developer/>
-	</developers>
-	<scm>
-		<connection/>
-		<developerConnection/>
-		<tag/>
-		<url/>
-	</scm>
+	<name>FastBase</name>
+	<description>Moteur de Données Haute Performance</description>
+
 	<properties>
 		<java.version>17</java.version>
+		<!-- Override Logback version to fix CVE-2024-12798 -->
+		<logback.version>1.5.12</logback.version>
 	</properties>
 	<dependencies>
+		<!-- Spring Boot Web pour l'API REST -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter</artifactId>
+			<artifactId>spring-boot-starter-web</artifactId>
 		</dependency>
 
+		<!-- Apache Commons pour utilitaires -->
+		<dependency>
+			<groupId>org.apache.commons</groupId>
+			<artifactId>commons-lang3</artifactId>
+		</dependency>
+
+		<!-- Apache Parquet pour lecture fichiers Parquet -->
+		<dependency>
+			<groupId>org.apache.parquet</groupId>
+			<artifactId>parquet-hadoop</artifactId>
+			<version>1.13.1</version>
+		</dependency>
+
+		<!-- Hadoop pour Parquet -->
+		<dependency>
+			<groupId>org.apache.hadoop</groupId>
+			<artifactId>hadoop-common</artifactId>
+			<version>3.3.6</version>
+			<exclusions>
+				<exclusion>
+					<groupId>org.slf4j</groupId>
+					<artifactId>slf4j-reload4j</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+
+		<!-- Tests -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-test</artifactId>
