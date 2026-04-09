@@ -1,11 +1,16 @@
 package com.fastbase.model;
 
+import lombok.Getter;
+import lombok.Setter;
+
 import java.util.HashMap;
 import java.util.Map;
 
 /**
  * Représente une ligne de données dans une table
  */
+@Setter
+@Getter
 public class Row {
 
     private Map<String, Object> data;//nom de la colonne : la donnee
@@ -24,14 +29,6 @@ public class Row {
 
     public void setValue(String columnName, Object value) {
         data.put(columnName, value);
-    }
-
-    public Map<String, Object> getData() {
-        return data;
-    }
-
-    public void setData(Map<String, Object> data) {
-        this.data = data;
     }
 
     @Override

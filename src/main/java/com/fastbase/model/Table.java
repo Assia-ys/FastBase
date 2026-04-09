@@ -1,11 +1,18 @@
 package com.fastbase.model;
 
+import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
+
 import java.util.ArrayList;
 import java.util.List;
 
 /**
  * Représente une table dans FastBase
  */
+@Setter
+@Getter
+@Data
 public class Table {
 
     private String name;
@@ -23,30 +30,6 @@ public class Table {
         this.rows = new ArrayList<>();
     }
 
-    public String getName() {
-        return name;
-    }
-
-    public void setName(String name) {
-        this.name = name;
-    }
-
-    public List<Column> getColumns() {
-        return columns;
-    }
-
-    public void setColumns(List<Column> columns) {
-        this.columns = columns;
-    }
-
-    public List<Row> getRows() {
-        return rows;
-    }
-
-    public void setRows(List<Row> rows) {
-        this.rows = rows;
-    }
-
     public void addRow(Row row) {
         this.rows.add(row);
     }
@@ -58,5 +41,16 @@ public class Table {
     @Override
     public String toString() {
         return "Table{name='" + name + "', columns=" + columns.size() + ", rows=" + rows.size() + "}";
+    }
+    public int getColumnIndex(String columnName) {
+        for (int i = 0; i < columns.size(); i++) {
+            if (columns.get(i).getName().equals(columnName)) return i;
+        }
+        return -1;
+    }
+
+    public Column getColumn(String columnName) {
+        int idx = getColumnIndex(columnName);
+        return idx >= 0 ? columns.get(idx) : null;
     }
 }

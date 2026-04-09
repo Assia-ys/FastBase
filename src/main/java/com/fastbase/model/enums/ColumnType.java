@@ -1,4 +1,4 @@
-package com.fastbase.model;
+package com.fastbase.model.enums;
 
 /**
  * Types de données supportés par FastBase
