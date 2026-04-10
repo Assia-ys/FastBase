@@ -1,31 +1,26 @@
 package com.fastbase.dto;
 
-import lombok.Getter;
-import lombok.Setter;
+import jakarta.validation.constraints.NotBlank;
 
 import java.util.List;
 
-/**
- * DTO pour exécuter une requête sur une table
- */
-@Setter
-@Getter
 public class QueryRequest {
 
+    @NotBlank(message = "Le nom de la table est obligatoire")
     private String tableName;
+
     private List<String> selectColumns;
     private String whereCondition;
     private List<String> groupByColumns;
-    
 
-    public QueryRequest(String tableName, List<String> selectColumns) {
-        this.tableName = tableName;
-        this.selectColumns = selectColumns;
-    }
+    public QueryRequest() {}
 
-    @Override
-    public String toString() {
-        return "QueryRequest{tableName='" + tableName + "', selectColumns=" + selectColumns +
-               ", whereCondition='" + whereCondition + "', groupByColumns=" + groupByColumns + "}";
-    }
+    public String getTableName()                    { return tableName; }
+    public void setTableName(String t)              { this.tableName = t; }
+    public List<String> getSelectColumns()          { return selectColumns; }
+    public void setSelectColumns(List<String> cols) { this.selectColumns = cols; }
+    public String getWhereCondition()               { return whereCondition; }
+    public void setWhereCondition(String w)         { this.whereCondition = w; }
+    public List<String> getGroupByColumns()         { return groupByColumns; }
+    public void setGroupByColumns(List<String> g)   { this.groupByColumns = g; }
 }

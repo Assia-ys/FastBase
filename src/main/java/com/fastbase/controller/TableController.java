@@ -6,7 +6,6 @@ import com.fastbase.model.Table;
 import com.fastbase.service.DataLoaderService;
 import com.fastbase.service.TableService;
 import jakarta.validation.Valid;
-import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
@@ -16,11 +15,15 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/tables")
-@RequiredArgsConstructor
 public class TableController {
 
     private final TableService tableService;
     private final DataLoaderService dataLoaderService;
+
+    public TableController(TableService tableService, DataLoaderService dataLoaderService) {
+        this.tableService      = tableService;
+        this.dataLoaderService = dataLoaderService;
+    }
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)

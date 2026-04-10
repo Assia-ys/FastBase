@@ -41,8 +41,6 @@ public class TableService {
     }
 
     public boolean deleteTable(String tableName) {
-        if (!dataStorage.tableExists(tableName))
-            throw new TableNotFoundException(tableName);
         return dataStorage.deleteTable(tableName);
     }
 

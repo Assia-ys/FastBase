@@ -36,10 +36,6 @@ public class QueryService {
         return projectRows(rows, resolveColumns(table, selectCols), table.getColumns());
     }
 
-    // -------------------------------------------------------------------------
-    // WHERE
-    // -------------------------------------------------------------------------
-
     private List<Row> applyWhere(Table table, String whereCondition) {
         if (whereCondition == null || whereCondition.isBlank())
             return table.getRows();
@@ -51,10 +47,6 @@ public class QueryService {
         }
         return filtered;
     }
-
-    // -------------------------------------------------------------------------
-    // GROUP BY + agrégations
-    // -------------------------------------------------------------------------
 
     private List<Map<String, Object>> applyGroupBy(
             Table table, List<Row> rows, List<String> selectCols, List<String> groupByCols) {
@@ -76,7 +68,7 @@ public class QueryService {
             Row first = groupRows.get(0);
 
             for (int i = 0; i < groupByCols.size(); i++)
-                result.put(groupByCols.get(i), first.getValue(String.valueOf(groupIdx[i])));
+                result.put(groupByCols.get(i), first.getValue(groupIdx[i]));
 
             if (selectCols != null) {
                 for (String col : selectCols) {
@@ -92,10 +84,6 @@ public class QueryService {
         }
         return results;
     }
-
-    // -------------------------------------------------------------------------
-    // Projection
-    // -------------------------------------------------------------------------
 
     private List<Column> resolveColumns(Table table, List<String> selectCols) {
         if (selectCols == null || selectCols.isEmpty() || selectCols.contains("*"))
@@ -117,19 +105,15 @@ public class QueryService {
         for (Row row : rows) {
             Map<String, Object> map = new LinkedHashMap<>(projected.size() * 2);
             for (int i = 0; i < projected.size(); i++)
-                if (indices[i] >= 0) map.put(projected.get(i).getName(), row.getValue(String.valueOf(indices[i])));
+                if (indices[i] >= 0) map.put(projected.get(i).getName(), row.getValue(indices[i]));
             result.add(map);
         }
         return result;
     }
 
-    // -------------------------------------------------------------------------
-    // Helpers agrégation
-    // -------------------------------------------------------------------------
-
     private String buildGroupKey(Row row, int[] idx) {
         StringBuilder sb = new StringBuilder();
-        for (int i : idx) sb.append(row.getValue(String.valueOf(i))).append('|');
+        for (int i : idx) sb.append(row.getValue(i)).append('|');
         return sb.toString();
     }
 
@@ -139,7 +123,7 @@ public class QueryService {
 
     private double sumCol(List<Row> rows, int idx) {
         double s = 0;
-        for (Row r : rows) { Object v = r.getValue(String.valueOf(idx)); if (v instanceof Number n) s += n.doubleValue(); }
+        for (Row r : rows) { Object v = r.getValue(idx); if (v instanceof Number n) s += n.doubleValue(); }
         return s;
     }
 
@@ -149,19 +133,15 @@ public class QueryService {
 
     private Object minCol(List<Row> rows, int idx) {
         double m = Double.MAX_VALUE;
-        for (Row r : rows) { Object v = r.getValue(String.valueOf(idx)); if (v instanceof Number n) m = Math.min(m, n.doubleValue()); }
+        for (Row r : rows) { Object v = r.getValue(idx); if (v instanceof Number n) m = Math.min(m, n.doubleValue()); }
         return m == Double.MAX_VALUE ? null : m;
     }
 
     private Object maxCol(List<Row> rows, int idx) {
         double m = -Double.MAX_VALUE;
-        for (Row r : rows) { Object v = r.getValue(String.valueOf(idx)); if (v instanceof Number n) m = Math.max(m, n.doubleValue()); }
+        for (Row r : rows) { Object v = r.getValue(idx); if (v instanceof Number n) m = Math.max(m, n.doubleValue()); }
         return m == -Double.MAX_VALUE ? null : m;
     }
-
-    // -------------------------------------------------------------------------
-    // Condition WHERE
-    // -------------------------------------------------------------------------
 
     private static class WhereCondition {
 
@@ -206,7 +186,7 @@ public class QueryService {
         }
 
         boolean matches(Row row) {
-            Object cell = row.getValue(String.valueOf(colIndex));
+            Object cell = row.getValue(colIndex);
             if (cell == null) return false;
 
             if (op == Op.LIKE) {

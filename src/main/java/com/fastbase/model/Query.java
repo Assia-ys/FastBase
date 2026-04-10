@@ -1,30 +1,32 @@
 package com.fastbase.model;
 
-import lombok.Getter;
-import lombok.Setter;
-
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Représente une requête SQL simplifiée
- */
-@Setter
-@Getter
 public class Query {
 
     private String tableName;
-    private List<String> selectColumns;  // SELECT
-    private String whereCondition;        // WHERE
-    private List<String> groupByColumns;  // GROUP BY
+    private List<String> selectColumns  = new ArrayList<>();
+    private String whereCondition;
+    private List<String> groupByColumns = new ArrayList<>();
 
-    public Query() {
-        this.selectColumns = new ArrayList<>();
-        this.groupByColumns = new ArrayList<>();
-    }
+    public Query() {}
+
+    public String getTableName()                         { return tableName; }
+    public void setTableName(String tableName)           { this.tableName = tableName; }
+    public List<String> getSelectColumns()               { return selectColumns; }
+    public void setSelectColumns(List<String> cols)      { this.selectColumns = cols; }
+    public String getWhereCondition()                    { return whereCondition; }
+    public void setWhereCondition(String whereCondition) { this.whereCondition = whereCondition; }
+    public List<String> getGroupByColumns()              { return groupByColumns; }
+    public void setGroupByColumns(List<String> cols)     { this.groupByColumns = cols; }
+
+    public boolean isSelectAll()  { return selectColumns == null || selectColumns.isEmpty() || selectColumns.contains("*"); }
+    public boolean hasWhere()     { return whereCondition != null && !whereCondition.isBlank(); }
+    public boolean hasGroupBy()   { return groupByColumns != null && !groupByColumns.isEmpty(); }
+
     @Override
     public String toString() {
-        return "Query{tableName='" + tableName + "', selectColumns=" + selectColumns +
-               ", whereCondition='" + whereCondition + "', groupByColumns=" + groupByColumns + "}";
+        return "Query{table='" + tableName + "', select=" + selectColumns + ", where='" + whereCondition + "', groupBy=" + groupByColumns + "}";
     }
 }
