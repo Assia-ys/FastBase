@@ -39,6 +39,7 @@ public class DataLoaderService {
             if (headerLine == null) throw new IOException("Le fichier CSV est vide");
 
             String[] csvHeaders   = parseCsvLine(headerLine);
+            /** buildColumnMapping vérifie les noms de l'en tête du CSV et les compares aux colonnes de la table, malgré l'ordre de colonnes n'est pas le même que dans le code */
             int[]    columnMapping = buildColumnMapping(csvHeaders, columns);
 
             List<Row> batch = new ArrayList<>(BATCH_SIZE);
