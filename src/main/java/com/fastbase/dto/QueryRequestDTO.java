@@ -4,7 +4,7 @@ import jakarta.validation.constraints.NotBlank;
 
 import java.util.List;
 
-public class QueryRequest {
+public class QueryRequestDTO {
 
     @NotBlank(message = "Le nom de la table est obligatoire")
     private String tableName;
@@ -13,7 +13,7 @@ public class QueryRequest {
     private String whereCondition;
     private List<String> groupByColumns;
 
-    public QueryRequest() {}
+    public QueryRequestDTO() {}
 
     public String getTableName()                    { return tableName; }
     public void setTableName(String t)              { this.tableName = t; }

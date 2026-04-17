@@ -17,6 +17,7 @@ public class Table {
     public Table(String name, List<Column> columns) {
         this.name    = name;
         this.columns = columns != null ? columns : new ArrayList<>();
+        // Pré-allocation à 1024 pour éviter les réallocations répétées lors du chargement massif
         this.rows    = new ArrayList<>(1024);
     }
 
@@ -27,10 +28,10 @@ public class Table {
     public List<Row> getRows()           { return rows; }
     public void setRows(List<Row> rows)  { this.rows = rows; }
 
-    public void addRow(Row row)          { rows.add(row); }
     public void addRows(List<Row> batch) { rows.addAll(batch); }
     public int getRowCount()             { return rows.size(); }
 
+    // méthode clé pour la perf — évite de stocker les noms de colonnes
     public int getColumnIndex(String columnName) {
         for (int i = 0; i < columns.size(); i++) {
             if (columns.get(i).getName().equals(columnName)) return i;

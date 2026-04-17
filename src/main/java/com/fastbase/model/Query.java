@@ -21,10 +21,6 @@ public class Query {
     public List<String> getGroupByColumns()              { return groupByColumns; }
     public void setGroupByColumns(List<String> cols)     { this.groupByColumns = cols; }
 
-    public boolean isSelectAll()  { return selectColumns == null || selectColumns.isEmpty() || selectColumns.contains("*"); }
-    public boolean hasWhere()     { return whereCondition != null && !whereCondition.isBlank(); }
-    public boolean hasGroupBy()   { return groupByColumns != null && !groupByColumns.isEmpty(); }
-
     @Override
     public String toString() {
         return "Query{table='" + tableName + "', select=" + selectColumns + ", where='" + whereCondition + "', groupBy=" + groupByColumns + "}";
