@@ -24,22 +24,6 @@ public class Row {
     public void setValue(int columnIndex, Object value) {
         values[columnIndex] = value;
     }
-
-    public Object getValue(String columnName, List<Column> columns) {
-        for (int i = 0; i < columns.size(); i++) {
-            if (columns.get(i).getName().equals(columnName)) return values[i];
-        }
-        return null;
-    }
-
-    public Map<String, Object> toMap(List<Column> columns) {
-        Map<String, Object> map = new HashMap<>(columns.size() * 2);
-        for (int i = 0; i < columns.size(); i++) {
-            map.put(columns.get(i).getName(), values[i]);
-        }
-        return map;
-    }
-
     public Object[] getValues() {
         return values;
     }

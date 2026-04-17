@@ -1,6 +1,6 @@
 package com.fastbase.controller;
 
-import com.fastbase.dto.QueryRequest;
+import com.fastbase.dto.QueryRequestDTO;
 import com.fastbase.service.QueryService;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.*;
@@ -19,7 +19,7 @@ public class QueryController {
     }
 
     @PostMapping("/select")
-    public Map<String, Object> executeQuery(@Valid @RequestBody QueryRequest request) {
+    public Map<String, Object> executeQuery(@Valid @RequestBody QueryRequestDTO request) {
         long start = System.currentTimeMillis();
         List<Map<String, Object>> results = queryService.execute(
                 request.getTableName(),

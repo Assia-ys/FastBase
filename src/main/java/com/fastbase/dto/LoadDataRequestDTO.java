@@ -1,9 +1,10 @@
 package com.fastbase.dto;
 
+import com.fastbase.model.enums.FileFormat;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 
-public class LoadDataRequest {
+public class LoadDataRequestDTO {
 
     @NotBlank(message = "Le nom de la table est obligatoire")
     private String tableName;
@@ -14,9 +15,8 @@ public class LoadDataRequest {
     @NotNull(message = "Le format est obligatoire")
     private FileFormat format;
 
-    public enum FileFormat { CSV, PARQUET }
 
-    public LoadDataRequest() {}
+    public LoadDataRequestDTO() {}
 
     public String getTableName()        { return tableName; }
     public void setTableName(String t)  { this.tableName = t; }

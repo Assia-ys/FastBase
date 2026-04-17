@@ -1,7 +1,7 @@
 package com.fastbase.controller;
 
-import com.fastbase.dto.CreateTableRequest;
-import com.fastbase.dto.LoadDataRequest;
+import com.fastbase.dto.CreateTableRequestDTO;
+import com.fastbase.dto.LoadDataRequestDTO;
 import com.fastbase.model.Table;
 import com.fastbase.service.DataLoaderService;
 import com.fastbase.service.TableService;
@@ -27,7 +27,7 @@ public class TableController {
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
-    public Map<String, Object> createTable(@Valid @RequestBody CreateTableRequest request) {
+    public Map<String, Object> createTable(@Valid @RequestBody CreateTableRequestDTO request) {
         Table table = tableService.createTable(request.getTableName(), request.getColumns());
         return Map.of("message", "Table créée avec succès", "tableName", table.getName(), "columns", table.getColumns().size());
     }
@@ -49,7 +49,7 @@ public class TableController {
     }
 
     @PostMapping("/load")
-    public Map<String, Object> loadData(@Valid @RequestBody LoadDataRequest request) throws IOException {
+    public Map<String, Object> loadData(@Valid @RequestBody LoadDataRequestDTO request) throws IOException {
         long start = System.currentTimeMillis();
         int rows = switch (request.getFormat()) {
             case CSV     -> dataLoaderService.loadCsvData(request.getTableName(), request.getFilePath());
