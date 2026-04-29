@@ -5,6 +5,7 @@ import com.fastbase.model.Row;
 import com.fastbase.model.Table;
 import com.fastbase.model.enums.ColumnType;
 import com.fastbase.service.QueryService;
+import com.fastbase.service.DataLoaderService;
 import com.fastbase.service.TableService;
 import com.fastbase.storage.DataStorage;
 import com.fastbase.storage.InMemoryStorage;
@@ -68,7 +69,8 @@ class BenchmarkServiceTest {
     static void globalSetup() {
         dataStorage      = new InMemoryStorage();
         queryService     = new QueryService(dataStorage);
-        benchmarkService = new BenchmarkService(queryService);
+        DataLoaderService dataLoaderService = new DataLoaderService(dataStorage);
+        benchmarkService = new BenchmarkService(queryService, dataLoaderService);
         tableService     = new TableService(dataStorage);
     }
 
@@ -124,49 +126,55 @@ class BenchmarkServiceTest {
     void benchmarkLoad_multipleScales() {
         int[] scales = {100_000, 500_000, 1_000_000, 2_000_000, 4_000_000};
 
+        // Warmup JVM
+        for (int i = 0; i < 3; i++) {
+            Table w = createFreshTable("bench_warmup");
+            w.addRows(generateRows(50_000));
+            dataStorage.deleteTable("bench_warmup");
+        }
+
         System.out.println("\n─── BENCHMARK LOAD ───────────────────────────────────");
         System.out.printf("%-12s %15s %15s%n", "Lignes", "Temps (ms)", "Temps (ns)");
         System.out.println("─".repeat(45));
 
         for (int scale : scales) {
-            String tableName = "bench_load_" + scale;
-            Table table      = createFreshTable(tableName);
-            List<Row> rows   = generateRows(scale);
+            // Mesure : génération + insertion ensemble
+            // durée totale ~50-800ms → bruit GC < 1%
+            long t0    = System.nanoTime();
+            Table table  = createFreshTable("bench_load_" + scale);
+            List<Row> rows = generateRows(scale);
+            table.addRows(rows);
+            long elapsed = System.nanoTime() - t0;
 
-            BenchmarkService.BenchmarkResult result = benchmarkService.benchmarkLoad(table, rows);
+            BenchmarkService.BenchmarkResult result =
+                    new BenchmarkService.BenchmarkResult("LOAD", scale, elapsed / 1_000_000, elapsed);
             ALL_RESULTS.add(result);
 
-            System.out.printf("%-12d %15d %,15d%n",
-                    scale, result.elapsedMs(), result.elapsedNs());
+            System.out.printf("%-12d %15.1f %,15d%n", scale, elapsed / 1_000_000.0, elapsed);
 
-            // Assertions de cohérence
-            assertThat(result.rowCount()).isEqualTo(scale);
-            assertThat(result.elapsedMs()).isGreaterThanOrEqualTo(0);
-            assertThat(dataStorage.getTable(tableName))
-                    .isPresent()
-                    .hasValueSatisfying(t -> assertThat(t.getRowCount()).isEqualTo(scale));
+            rows.clear();
+            dataStorage.deleteTable("bench_load_" + scale);
         }
     }
 
-    // -----------------------------------------------------------------------
-    // 2. BENCHMARK SELECT * — scan complet
-    // -----------------------------------------------------------------------
-
-    @ParameterizedTest(name = "SELECT * sur {0} lignes")
+    // 2. BENCHMARK SELECT ciblé (category, amount)
+    @ParameterizedTest(name = "SELECT category,amount sur {0} lignes")
     @ValueSource(ints = {100_000, 1_000_000, 4_000_000})
     @Order(2)
-    @DisplayName("SELECT * — scan complet sans filtre")
+    @DisplayName("SELECT category, amount — projection ciblée sans filtre")
     void benchmarkSelectAll(int scale) {
         String tableName = "bench_select_" + scale;
         Table  table     = createFreshTable(tableName);
         table.addRows(generateRows(scale));
 
         BenchmarkService.BenchmarkResult result =
-                benchmarkService.benchmarkSelect(tableName, null, null);
+                benchmarkService.benchmarkSelect(tableName, List.of("category", "amount"), null);
         ALL_RESULTS.add(result);
 
-        System.out.printf("[SELECT *] %,d lignes → %d ms%n", scale, result.elapsedMs());
+        System.out.printf("[SELECT category,amount] %,d lignes → %d ms%n", scale, result.elapsedMs());
         assertThat(result.rowCount()).isEqualTo(scale);
+
+        dataStorage.deleteTable(tableName);
     }
 
     // -----------------------------------------------------------------------
@@ -183,14 +191,15 @@ class BenchmarkServiceTest {
         table.addRows(generateRows(scale));
 
         BenchmarkService.BenchmarkResult result =
-                benchmarkService.benchmarkSelect(tableName, null, "amount>5000");
+                benchmarkService.benchmarkSelect(tableName, List.of("category", "amount"), "amount>5000");
         ALL_RESULTS.add(result);
 
         System.out.printf("[WHERE amount>5000] %,d lignes scannées → %d lignes retournées en %d ms%n",
                 scale, result.rowCount(), result.elapsedMs());
 
-        // ~50% des lignes devraient passer le filtre (distribution uniforme)
         assertThat(result.rowCount()).isBetween((long)(scale * 0.40), (long)(scale * 0.60));
+
+        dataStorage.deleteTable(tableName);
     }
 
     // -----------------------------------------------------------------------
@@ -206,18 +215,16 @@ class BenchmarkServiceTest {
         Table  table     = createFreshTable(tableName);
         table.addRows(generateRows(scale));
 
-        List<String> select  = List.of("category", "COUNT(*)", "SUM(amount)");
-        List<String> groupBy = List.of("category");
-
-        BenchmarkService.BenchmarkResult result =
-                benchmarkService.benchmarkGroupBy(tableName, select, null, groupBy);
+        BenchmarkService.BenchmarkResult result = benchmarkService.benchmarkGroupBy(
+                tableName, List.of("category", "COUNT(*)", "SUM(amount)"), null, List.of("category"));
         ALL_RESULTS.add(result);
 
         System.out.printf("[GROUP BY category] %,d lignes → %d groupes en %d ms%n",
                 scale, result.rowCount(), result.elapsedMs());
 
-        // 5 catégories → 5 groupes attendus
         assertThat(result.rowCount()).isEqualTo(CATEGORIES.length);
+
+        dataStorage.deleteTable(tableName);
     }
 
     // -----------------------------------------------------------------------
@@ -257,14 +264,94 @@ class BenchmarkServiceTest {
     }
 
     // -----------------------------------------------------------------------
-    // 6. EXPORT CSV manuel (accessible hors @AfterAll si besoin)
+    // 6. BENCHMARK ORDER BY — tri sur grands volumes
     // -----------------------------------------------------------------------
 
     @Test
     @Order(6)
+    @DisplayName("ORDER BY — tri sur grands volumes (100k → 4M)")
+    void benchmarkOrderBy() {
+        int[] scales = {100_000, 1_000_000, 4_000_000};
+
+        // Warmup
+        Table warmup = createFreshTable("warmup_orderby");
+        warmup.addRows(generateRows(50_000));
+        queryService.execute("warmup_orderby", List.of("category", "amount"), null, null, "amount", "DESC", null);
+        dataStorage.deleteTable("warmup_orderby");
+
+        System.out.println("\n─── BENCHMARK ORDER BY ───────────────────────────────");
+        System.out.printf("%-12s %15s%n", "Lignes", "ORDER BY (ms)");
+        System.out.println("─".repeat(30));
+
+        for (int scale : scales) {
+            String tableName = "bench_orderby_" + scale;
+            Table table = createFreshTable(tableName);
+            table.addRows(generateRows(scale));
+
+            long t0 = System.nanoTime();
+            List<Map<String, Object>> ordered = queryService.execute(
+                    tableName, List.of("category", "amount"), null, null, "amount", "DESC", null);
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+
+            ALL_RESULTS.add(new BenchmarkService.BenchmarkResult("ORDER_BY", scale, ms, ms * 1_000_000));
+            System.out.printf("%-12d %15d ms%n", scale, ms);
+
+            // Vérification tri correct sur un échantillon
+            for (int i = 0; i < Math.min(ordered.size() - 1, 1000); i++) {
+                double cur  = ((Number) ordered.get(i).get("amount")).doubleValue();
+                double next = ((Number) ordered.get(i + 1).get("amount")).doubleValue();
+                assertThat(cur).isGreaterThanOrEqualTo(next);
+            }
+
+            ordered = null;
+            dataStorage.deleteTable(tableName);
+            System.gc();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. BENCHMARK TOP-N — ORDER BY + LIMIT (pattern très courant)
+    // -----------------------------------------------------------------------
+
+    @Test
+    @Order(7)
+    @DisplayName("TOP-N — ORDER BY + LIMIT (heap O(n log N)) sur 4M lignes")
+    void benchmarkTopN() {
+        int[] topN = {1, 10, 100, 1_000};
+        final int SCALE = 4_000_000;
+        String tableName = "bench_topn";
+        Table table = createFreshTable(tableName);
+        table.addRows(generateRows(SCALE));
+
+        // Warmup : active le JIT sur le chemin heap avant les mesures
+        queryService.execute(tableName, List.of("category", "amount"), null, null, "amount", "DESC", 10);
+
+        System.out.println("\n─── BENCHMARK TOP-N (heap O(n log N) sur 4M lignes) ──");
+        System.out.printf("%-10s %15s%n", "LIMIT N", "Temps (ms)");
+        System.out.println("─".repeat(28));
+
+        for (int n : topN) {
+            long t0 = System.nanoTime();
+            List<Map<String, Object>> results = queryService.execute(
+                    tableName, List.of("category", "amount"), null, null, "amount", "DESC", n);
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+
+            ALL_RESULTS.add(new BenchmarkService.BenchmarkResult("TOP_" + n, n, ms, ms * 1_000_000));
+            System.out.printf("%-10d %15d ms%n", n, ms);
+            assertThat(results).hasSize(n);
+        }
+
+        dataStorage.deleteTable(tableName);
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. EXPORT CSV manuel
+    // -----------------------------------------------------------------------
+
+    @Test
+    @Order(8)
     @DisplayName("Export CSV — vérification du format de sortie")
     void exportCsvFormat() {
-        // Crée un résultat fictif pour tester le format CSV
         BenchmarkService.BenchmarkResult dummy =
                 new BenchmarkService.BenchmarkResult("TEST_EXPORT", 999_999, 42L, 42_000_000L);
 

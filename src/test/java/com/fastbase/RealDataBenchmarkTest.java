@@ -1,10 +1,10 @@
 package com.fastbase;
 
 import com.fastbase.model.Column;
-import com.fastbase.model.Row;
 import com.fastbase.model.Table;
 import com.fastbase.model.enums.ColumnType;
 import com.fastbase.service.BenchmarkService;
+import com.fastbase.service.DataLoaderService;
 import com.fastbase.service.QueryService;
 import com.fastbase.service.TableService;
 import com.fastbase.storage.DataStorage;
@@ -18,36 +18,53 @@ import java.util.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Benchmark réel finalisé (sans conflit mémoire).
- * Charge les données en streaming depuis le dossier externe data_NYC.
+ * Benchmark sur données réelles NYC Yellow Taxi 2016-01 (19 colonnes, jusqu'à 4M lignes).
+ * Utilise DataLoaderService pour un mapping correct par nom de colonne.
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class RealDataBenchmarkTest {
 
     private static final String DATA_PATH = "../data_NYC/yellow_tripdata_2016-01.csv";
 
+    // Schéma complet des 19 colonnes du CSV NYC Taxi 2016
     private static final List<Column> SCHEMA = List.of(
-            new Column("VendorID", ColumnType.INTEGER),
-            new Column("passenger_count", ColumnType.INTEGER),
-            new Column("trip_distance", ColumnType.DOUBLE),
-            new Column("fare_amount", ColumnType.DOUBLE),
-            new Column("total_amount", ColumnType.DOUBLE)
+            new Column("VendorID",              ColumnType.INTEGER),
+            new Column("tpep_pickup_datetime",  ColumnType.STRING),
+            new Column("tpep_dropoff_datetime", ColumnType.STRING),
+            new Column("passenger_count",       ColumnType.INTEGER),
+            new Column("trip_distance",         ColumnType.DOUBLE),
+            new Column("pickup_longitude",      ColumnType.DOUBLE),
+            new Column("pickup_latitude",       ColumnType.DOUBLE),
+            new Column("RatecodeID",            ColumnType.INTEGER),
+            new Column("store_and_fwd_flag",    ColumnType.STRING),
+            new Column("dropoff_longitude",     ColumnType.DOUBLE),
+            new Column("dropoff_latitude",      ColumnType.DOUBLE),
+            new Column("payment_type",          ColumnType.INTEGER),
+            new Column("fare_amount",           ColumnType.DOUBLE),
+            new Column("extra",                 ColumnType.DOUBLE),
+            new Column("mta_tax",               ColumnType.DOUBLE),
+            new Column("tip_amount",            ColumnType.DOUBLE),
+            new Column("tolls_amount",          ColumnType.DOUBLE),
+            new Column("improvement_surcharge", ColumnType.DOUBLE),
+            new Column("total_amount",          ColumnType.DOUBLE)
     );
 
     private static final int[] SCALES = {100_000, 500_000, 1_000_000, 2_000_000, 4_000_000};
     private static final List<String> CSV_LINES = new ArrayList<>();
 
-    private static DataStorage dataStorage;
-    private static QueryService queryService;
+    private static DataStorage      dataStorage;
+    private static QueryService     queryService;
     private static BenchmarkService benchmarkService;
-    private static TableService tableService;
+    private static TableService     tableService;
+    private static DataLoaderService dataLoaderService;
 
     @BeforeAll
     static void setup() {
-        dataStorage = new InMemoryStorage();
-        queryService = new QueryService(dataStorage);
-        benchmarkService = new BenchmarkService(queryService);
-        tableService = new TableService(dataStorage);
+        dataStorage       = new InMemoryStorage();
+        queryService      = new QueryService(dataStorage);
+        dataLoaderService = new DataLoaderService(dataStorage);
+        benchmarkService  = new BenchmarkService(queryService, dataLoaderService);
+        tableService      = new TableService(dataStorage);
 
         CSV_LINES.add("operation,rowCount,elapsedMs,elapsedNs");
     }
@@ -60,48 +77,56 @@ class RealDataBenchmarkTest {
                 StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
 
         Path pyOut = Path.of("target/plot_benchmark.py");
-        Files.writeString(pyOut, buildPythonScript(), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        Files.writeString(pyOut, buildPythonScript(),
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
 
         System.out.println("\n=== EXPORT TERMINÉ ===");
         System.out.println("CSV  → " + csvOut.toAbsolutePath());
         System.out.println("Plot → " + pyOut.toAbsolutePath());
     }
 
-    // --- 1. BENCHMARK LOAD ---
+    // --- 1. BENCHMARK LOAD CSV réel (parsing + insertion) ---
     @Test
     @Order(1)
-    void benchmarkLoad() throws IOException {
+    @DisplayName("LOAD CSV réel — parsing + insertion (100k → 4M)")
+    void benchmarkLoad() {
         System.out.println("\n─── BENCHMARK LOAD ───────────────────────────────────");
         for (int scale : SCALES) {
             String tableName = "taxi_load_" + scale;
-            List<Row> rows = loadRowsFromFile(DATA_PATH, scale);
-
             dataStorage.deleteTable(tableName);
-            Table table = tableService.createTable(tableName, new ArrayList<>(SCHEMA));
+            tableService.createTable(tableName, new ArrayList<>(SCHEMA));
 
-            BenchmarkService.BenchmarkResult result = benchmarkService.benchmarkLoad(table, rows);
+            BenchmarkService.BenchmarkResult result =
+                    benchmarkService.benchmarkCsvLoad(tableName, DATA_PATH, scale);
             CSV_LINES.add(result.toCsvLine());
 
             System.out.printf("%-12d %15d ms%n", scale, result.elapsedMs());
-            rows.clear();
-            System.gc(); // Nettoyage mémoire préventif
+            assertThat(result.rowCount()).isEqualTo(scale);
+
+            // Libération mémoire entre chaque palier
+            dataStorage.deleteTable(tableName);
+            System.gc();
         }
     }
 
-    // --- 2. BENCHMARK SELECT * ---
+    // --- 2. BENCHMARK SELECT ciblé (pas de SELECT *) ---
     @Test
     @Order(2)
-    @DisplayName("SELECT * — scan complet")
-    void benchmarkSelectAll() {
-        System.out.println("\n─── BENCHMARK SELECT * ───────────────────────────────");
+    @DisplayName("SELECT fare_amount, total_amount — scan ciblé")
+    void benchmarkSelect() {
+        System.out.println("\n─── BENCHMARK SELECT ─────────────────────────────────");
         for (int scale : SCALES) {
             String tableName = "taxi_select_" + scale;
             prepareTable(tableName, scale);
 
-            BenchmarkService.BenchmarkResult result = benchmarkService.benchmarkSelect(tableName, null, null);
+            BenchmarkService.BenchmarkResult result = benchmarkService.benchmarkSelect(
+                    tableName, List.of("fare_amount", "total_amount"), null);
             CSV_LINES.add(result.toCsvLine());
 
-            System.out.printf("[SELECT *] %,d lignes → %d ms%n", scale, result.elapsedMs());
+            System.out.printf("[SELECT] %,d lignes → %d ms%n", scale, result.elapsedMs());
+
+            dataStorage.deleteTable(tableName);
+            System.gc();
         }
     }
 
@@ -115,57 +140,50 @@ class RealDataBenchmarkTest {
             String tableName = "taxi_where_" + scale;
             prepareTable(tableName, scale);
 
-            BenchmarkService.BenchmarkResult result = benchmarkService.benchmarkSelect(tableName, null, "fare_amount>10");
+            BenchmarkService.BenchmarkResult result = benchmarkService.benchmarkSelect(
+                    tableName, List.of("fare_amount", "total_amount"), "fare_amount>10");
             CSV_LINES.add(result.toCsvLine());
 
-            System.out.printf("[WHERE] %,d lignes → %d ms%n", scale, result.elapsedMs());
-        }
-    }
+            System.out.printf("[WHERE fare_amount>10] %,d lignes → %d ms%n", scale, result.elapsedMs());
 
-    // --- HELPERS ---
-    private List<Row> loadRowsFromFile(String path, int limit) throws IOException {
-        List<Row> rows = new ArrayList<>(limit);
-        try (BufferedReader br = new BufferedReader(new FileReader(path), 1 << 20)) {
-            br.readLine(); // Skip header
-            String line;
-            int count = 0;
-            while ((line = br.readLine()) != null && count < limit) {
-                String[] parts = line.split(",", -1);
-                Row row = new Row(SCHEMA.size());
-                for (int c = 0; c < SCHEMA.size(); c++) {
-                    String raw = c < parts.length ? parts[c].trim() : "";
-                    row.setValue(c, parseValue(raw, SCHEMA.get(c).getType()));
-                }
-                rows.add(row);
-                count++;
-            }
-        }
-        return rows;
-    }
-
-    private void prepareTable(String tableName, int count) {
-        try {
             dataStorage.deleteTable(tableName);
-            Table table = tableService.createTable(tableName, new ArrayList<>(SCHEMA));
-            List<Row> rows = loadRowsFromFile(DATA_PATH, count);
-            table.addRows(rows);
-            rows.clear();
             System.gc();
-        } catch (IOException e) {
-            throw new RuntimeException("Erreur de préparation : " + e.getMessage());
         }
     }
 
-    private Object parseValue(String raw, ColumnType type) {
-        if (raw == null || raw.isEmpty()) return null;
+    // --- 4. BENCHMARK GROUP BY ---
+    @Test
+    @Order(4)
+    @DisplayName("GROUP BY VendorID avec COUNT et SUM(total_amount)")
+    void benchmarkGroupBy() {
+        System.out.println("\n─── BENCHMARK GROUP BY ───────────────────────────────");
+        for (int scale : SCALES) {
+            String tableName = "taxi_groupby_" + scale;
+            prepareTable(tableName, scale);
+
+            BenchmarkService.BenchmarkResult result = benchmarkService.benchmarkGroupBy(
+                    tableName,
+                    List.of("VendorID", "COUNT(trip_distance)", "SUM(total_amount)"),
+                    null,
+                    List.of("VendorID"));
+            CSV_LINES.add(result.toCsvLine());
+
+            System.out.printf("[GROUP BY VendorID] %,d lignes → %d groupes en %d ms%n",
+                    scale, result.rowCount(), result.elapsedMs());
+
+            dataStorage.deleteTable(tableName);
+            System.gc();
+        }
+    }
+
+    // --- Helper : prépare une table avec N lignes du CSV ---
+    private void prepareTable(String tableName, int maxRows) {
+        dataStorage.deleteTable(tableName);
+        tableService.createTable(tableName, new ArrayList<>(SCHEMA));
         try {
-            return switch (type) {
-                case INTEGER -> Integer.parseInt(raw);
-                case DOUBLE -> Double.parseDouble(raw);
-                default -> raw;
-            };
-        } catch (NumberFormatException e) {
-            return null;
+            dataLoaderService.loadCsvData(tableName, DATA_PATH, maxRows);
+        } catch (IOException e) {
+            throw new RuntimeException("Erreur préparation table : " + e.getMessage(), e);
         }
     }
 
@@ -175,55 +193,39 @@ class RealDataBenchmarkTest {
                 import matplotlib.pyplot as plt
                 import matplotlib.ticker as mticker
                 import os
-                
-                # --- Configuration des chemins ---
+
                 script_dir = os.path.dirname(os.path.abspath(__file__))
                 csv_path = os.path.join(script_dir, "benchmark-real.csv")
-                
+
                 if not os.path.exists(csv_path):
-                    print(f"Erreur : Le fichier {csv_path} est introuvable.")
+                    print(f"Erreur : {csv_path} introuvable.")
                     exit(1)
-                
-                # --- Chargement des données ---
+
                 df = pd.read_csv(csv_path)
-                
-                # --- Création de la figure ---
-                fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-                fig.suptitle("FastBase - Benchmarks NYC Taxi (4 Millions de lignes)", fontsize=16, fontweight='bold')
-                
-                # Couleurs et styles
-                colors = {"LOAD": "#2ecc71", "SELECT": "#3498db", "SELECT WHERE": "#e67e22"}
-                
-                def plot_sub_bench(ax, operation_name, color, title):
-                    sub_df = df[df['operation'].str.contains(operation_name, na=False)]
-                    if not sub_df.empty:
-                        ax.plot(sub_df['rowCount'], sub_df['elapsedMs'], marker='o', linestyle='-', color=color, linewidth=2)
-                        # Ajout des étiquettes de temps sur les points
-                        for x, y in zip(sub_df['rowCount'], sub_df['elapsedMs']):
-                            ax.annotate(f"{y}ms", (x, y), textcoords="offset points", xytext=(0,10), ha='center', fontsize=9)
-                
-                    ax.set_title(title)
+                operations = ["LOAD", "SELECT", "SELECT WHERE", "GROUP_BY"]
+                colors     = {"LOAD": "#2ecc71", "SELECT": "#3498db", "SELECT WHERE": "#e67e22", "GROUP_BY": "#9b59b6"}
+
+                fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+                fig.suptitle("FastBase — Benchmarks NYC Taxi (jusqu'à 4M lignes)", fontsize=15, fontweight='bold')
+                axes = axes.flatten()
+
+                for i, op in enumerate(operations):
+                    sub = df[df['operation'].str.upper().str.contains(op.replace(" ", "_"), na=False)]
+                    ax = axes[i]
+                    if not sub.empty:
+                        ax.plot(sub['rowCount'], sub['elapsedMs'], marker='o', color=colors.get(op, '#333'), linewidth=2)
+                        for x, y in zip(sub['rowCount'], sub['elapsedMs']):
+                            ax.annotate(f"{y}ms", (x, y), textcoords="offset points", xytext=(0, 8), ha='center', fontsize=8)
+                    ax.set_title(op)
                     ax.set_xlabel("Nombre de lignes")
                     ax.set_ylabel("Temps (ms)")
-                    ax.grid(True, linestyle='--', alpha=0.7)
-                    # Formatage de l'axe X pour afficher en Millions (M)
-                    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: format(int(x), ',').replace(',', ' ')))
-                
-                # 1. Graphique LOAD
-                plot_sub_bench(axes[0], "LOAD", colors["LOAD"], "Ingestion (LOAD)")
-                
-                # 2. Graphique SELECT *
-                plot_sub_bench(axes[1], "SELECT", colors["SELECT"], "Scan complet (SELECT *)")
-                
-                # 3. Graphique SELECT WHERE
-                plot_sub_bench(axes[2], "WHERE", colors["SELECT WHERE"], "Filtre (WHERE fare_amount > 10)")
-                
-                plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-                
-                # Sauvegarde
-                output_png = os.path.join(script_dir, "benchmark_results.png")
-                plt.savefig(output_png, dpi=150)
-                print(f"Graphique généré avec succès : {output_png}")
+                    ax.grid(True, linestyle='--', alpha=0.6)
+                    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{int(x):,}".replace(",", " ")))
+
+                plt.tight_layout()
+                out = os.path.join(script_dir, "benchmark_results.png")
+                plt.savefig(out, dpi=150)
+                print(f"Graphique → {out}")
                 plt.show()
                 """;
     }
