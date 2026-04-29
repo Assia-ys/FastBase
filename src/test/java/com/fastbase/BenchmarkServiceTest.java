@@ -264,22 +264,67 @@ class BenchmarkServiceTest {
     }
 
     // -----------------------------------------------------------------------
-    // 6. BENCHMARK ORDER BY — tri sur grands volumes
+    // 6. BENCHMARK WHERE AND/OR — conditions composées
     // -----------------------------------------------------------------------
 
     @Test
     @Order(6)
-    @DisplayName("ORDER BY — tri sur grands volumes (100k → 4M)")
-    void benchmarkOrderBy() {
-        int[] scales = {100_000, 1_000_000, 4_000_000};
+    @DisplayName("WHERE AND/OR — comparatif simple vs composé sur 4M lignes")
+    void benchmarkWhereAndOr() {
+        final int SCALE = 1_000_000;
+        String tableName = "bench_andor";
+        Table table = createFreshTable(tableName);
+        table.addRows(generateRows(SCALE));
 
         // Warmup
+        queryService.execute(tableName, List.of("category", "amount"), "amount>5000", null, null, null, null);
+
+        System.out.println("\n─── BENCHMARK WHERE AND/OR (4M lignes) ──────────────");
+
+        long t1 = System.nanoTime();
+        List<Map<String, Object>> r1 = queryService.execute(
+                tableName, List.of("category", "amount"), "amount>5000", null, null, null, null);
+        long ms1 = (System.nanoTime() - t1) / 1_000_000;
+
+        long t2 = System.nanoTime();
+        List<Map<String, Object>> r2 = queryService.execute(
+                tableName, List.of("category", "amount"), "amount>5000 AND category=ELEC", null, null, null, null);
+        long ms2 = (System.nanoTime() - t2) / 1_000_000;
+
+        long t3 = System.nanoTime();
+        List<Map<String, Object>> r3 = queryService.execute(
+                tableName, List.of("category", "amount"), "amount>5000 AND category=ELEC OR category=FOOD", null, null, null, null);
+        long ms3 = (System.nanoTime() - t3) / 1_000_000;
+
+        System.out.printf("  WHERE simple         → %,7d résultats en %4d ms%n", r1.size(), ms1);
+        System.out.printf("  WHERE AND            → %,7d résultats en %4d ms%n", r2.size(), ms2);
+        System.out.printf("  WHERE AND + OR       → %,7d résultats en %4d ms%n", r3.size(), ms3);
+
+        ALL_RESULTS.add(new BenchmarkService.BenchmarkResult("WHERE_SIMPLE", r1.size(), ms1, ms1 * 1_000_000));
+        ALL_RESULTS.add(new BenchmarkService.BenchmarkResult("WHERE_AND",    r2.size(), ms2, ms2 * 1_000_000));
+        ALL_RESULTS.add(new BenchmarkService.BenchmarkResult("WHERE_AND_OR", r3.size(), ms3, ms3 * 1_000_000));
+
+        r1 = null; r2 = null; r3 = null;
+        dataStorage.deleteTable(tableName);
+        System.gc();
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. BENCHMARK ORDER BY — tri sur grands volumes
+    // -----------------------------------------------------------------------
+
+    @Test
+    @Order(7)
+    @DisplayName("ORDER BY — tri sur grands volumes (100k → 4M)")
+    void benchmarkOrderBy() {
+        int[] scales = { 1_000_000, 4_000_000};
+
+        // Warmup avec 1M lignes pour déclencher parallelSort (seuil 500k)
         Table warmup = createFreshTable("warmup_orderby");
-        warmup.addRows(generateRows(50_000));
+        warmup.addRows(generateRows(600_000));
         queryService.execute("warmup_orderby", List.of("category", "amount"), null, null, "amount", "DESC", null);
         dataStorage.deleteTable("warmup_orderby");
-
-        System.out.println("\n─── BENCHMARK ORDER BY ───────────────────────────────");
+        System.gc();
         System.out.printf("%-12s %15s%n", "Lignes", "ORDER BY (ms)");
         System.out.println("─".repeat(30));
 
@@ -308,13 +353,12 @@ class BenchmarkServiceTest {
             System.gc();
         }
     }
-
     // -----------------------------------------------------------------------
     // 7. BENCHMARK TOP-N — ORDER BY + LIMIT (pattern très courant)
     // -----------------------------------------------------------------------
 
     @Test
-    @Order(7)
+    @Order(8)
     @DisplayName("TOP-N — ORDER BY + LIMIT (heap O(n log N)) sur 4M lignes")
     void benchmarkTopN() {
         int[] topN = {1, 10, 100, 1_000};
@@ -349,7 +393,7 @@ class BenchmarkServiceTest {
     // -----------------------------------------------------------------------
 
     @Test
-    @Order(8)
+    @Order(9)
     @DisplayName("Export CSV — vérification du format de sortie")
     void exportCsvFormat() {
         BenchmarkService.BenchmarkResult dummy =

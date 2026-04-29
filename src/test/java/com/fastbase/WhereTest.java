@@ -75,4 +75,50 @@ class WhereTest extends AbstractFastBaseTest {
         assertFalse(results.isEmpty());
         results.forEach(row -> assertTrue((Integer) row.get("salaire") > 50000));
     }
+
+    @Test
+    void whereAndAgeEtVille() {
+        List<Map<String, Object>> results = queryService.execute(
+                TABLE, List.of("*"), "age > 18 AND ville = Paris", null);
+        assertFalse(results.isEmpty());
+        results.forEach(row -> {
+            assertTrue((Integer) row.get("age") > 18);
+            assertEquals("Paris", row.get("ville"));
+        });
+    }
+
+    @Test
+    void whereAndTroisConditions() {
+        List<Map<String, Object>> results = queryService.execute(
+                TABLE, List.of("*"), "age > 18 AND ville = Paris AND salaire > 40000", null);
+        results.forEach(row -> {
+            assertTrue((Integer) row.get("age") > 18);
+            assertEquals("Paris", row.get("ville"));
+            assertTrue((Integer) row.get("salaire") > 40000);
+        });
+    }
+
+    @Test
+    void whereOrVille() {
+        List<Map<String, Object>> results = queryService.execute(
+                TABLE, List.of("*"), "ville = Paris OR ville = Lyon", null);
+        assertFalse(results.isEmpty());
+        results.forEach(row -> {
+            String ville = row.get("ville").toString();
+            assertTrue(ville.equals("Paris") || ville.equals("Lyon"));
+        });
+    }
+
+    @Test
+    void whereAndOrMixte() {
+        // AND prioritaire sur OR : (age > 18 AND ville = Paris) OR salaire > 70000
+        List<Map<String, Object>> results = queryService.execute(
+                TABLE, List.of("*"), "age > 18 AND ville = Paris OR salaire > 70000", null);
+        assertFalse(results.isEmpty());
+        results.forEach(row -> {
+            boolean group1 = (Integer) row.get("age") > 18 && "Paris".equals(row.get("ville"));
+            boolean group2 = (Integer) row.get("salaire") > 70000;
+            assertTrue(group1 || group2);
+        });
+    }
 }
