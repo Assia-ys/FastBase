@@ -24,16 +24,44 @@ public class QueryService {
             List<String> selectCols,
             String whereCondition,
             List<String> groupByCols) {
+        return execute(tableName, selectCols, whereCondition, groupByCols, null, null, null);
+    }
+
+    public List<Map<String, Object>> execute(
+            String tableName,
+            List<String> selectCols,
+            String whereCondition,
+            List<String> groupByCols,
+            String orderBy,
+            String orderDir,
+            Integer limit) {
 
         Table table = dataStorage.getTable(tableName)
                 .orElseThrow(() -> new TableNotFoundException(tableName));
 
         List<Row> rows = applyWhere(table, whereCondition);
 
-        if (groupByCols != null && !groupByCols.isEmpty())
-            return applyGroupBy(table, rows, selectCols, groupByCols);
+        List<Map<String, Object>> results;
+        if (groupByCols != null && !groupByCols.isEmpty()) {
+            results = applyGroupBy(table, rows, selectCols, groupByCols);
+            if (orderBy != null && !orderBy.isBlank())
+                applyOrderByMaps(results, orderBy, orderDir);
+            if (limit != null && limit > 0 && results.size() > limit)
+                results = results.subList(0, limit);
+        } else {
+            if (orderBy != null && !orderBy.isBlank()) {
+                boolean useHeap = limit != null && limit > 0 && limit < rows.size();
+                if (useHeap)
+                    rows = topNRows(rows, table, orderBy, orderDir, limit);
+                else
+                    sortRows(rows, table, orderBy, orderDir);
+            }
+            results = projectRows(rows, resolveColumns(table, selectCols), table);
+            if (limit != null && limit > 0 && orderBy == null && results.size() > limit)
+                results = results.subList(0, limit);
+        }
 
-        return projectRows(rows, resolveColumns(table, selectCols), table.getColumns());
+        return results;
     }
 
     private List<Row> applyWhere(Table table, String whereCondition) {
@@ -58,13 +86,29 @@ public class QueryService {
                 throw new InvalidQueryException("Colonne GROUP BY introuvable : " + groupByCols.get(i));
         }
 
-        Map<String, List<Row>> groups = new LinkedHashMap<>();
+        Map<String, List<Row>> groups = new HashMap<>();
         for (Row row : rows)
             groups.computeIfAbsent(buildGroupKey(row, groupIdx), k -> new ArrayList<>()).add(row);
 
+        // Indices des colonnes d'agrégat calculés une seule fois, pas à chaque itération de groupe
+        Map<String, Integer> aggColCache = new HashMap<>();
+        if (selectCols != null) {
+            for (String col : selectCols) {
+                String up = col.trim().toUpperCase();
+                if (up.startsWith("SUM(") || up.startsWith("AVG(") ||
+                    up.startsWith("MIN(") || up.startsWith("MAX(")) {
+                    String arg = extractArg(col);
+                    int idx = table.getColumnIndex(arg);
+                    if (idx < 0)
+                        throw new InvalidQueryException("Colonne d'agrégat introuvable : " + arg);
+                    aggColCache.put(col, idx);
+                }
+            }
+        }
+
         List<Map<String, Object>> results = new ArrayList<>(groups.size());
         for (List<Row> groupRows : groups.values()) {
-            Map<String, Object> result = new LinkedHashMap<>();
+            Map<String, Object> result = new HashMap<>();
             Row first = groupRows.get(0);
 
             for (int i = 0; i < groupByCols.size(); i++)
@@ -74,10 +118,10 @@ public class QueryService {
                 for (String col : selectCols) {
                     String up = col.trim().toUpperCase();
                     if      (up.startsWith("COUNT(")) result.put(col, (long) groupRows.size());
-                    else if (up.startsWith("SUM("))   result.put(col, sumCol(groupRows, table.getColumnIndex(extractArg(col))));
-                    else if (up.startsWith("AVG("))   result.put(col, avgCol(groupRows, table.getColumnIndex(extractArg(col))));
-                    else if (up.startsWith("MIN("))   result.put(col, minCol(groupRows, table.getColumnIndex(extractArg(col))));
-                    else if (up.startsWith("MAX("))   result.put(col, maxCol(groupRows, table.getColumnIndex(extractArg(col))));
+                    else if (up.startsWith("SUM("))   result.put(col, sumCol(groupRows, aggColCache.get(col)));
+                    else if (up.startsWith("AVG("))   result.put(col, avgCol(groupRows, aggColCache.get(col)));
+                    else if (up.startsWith("MIN("))   result.put(col, minCol(groupRows, aggColCache.get(col)));
+                    else if (up.startsWith("MAX("))   result.put(col, maxCol(groupRows, aggColCache.get(col)));
                 }
             }
             results.add(result);
@@ -96,19 +140,81 @@ public class QueryService {
         return result;
     }
 
-    private List<Map<String, Object>> projectRows(List<Row> rows, List<Column> projected, List<Column> all) {
+    private List<Map<String, Object>> projectRows(List<Row> rows, List<Column> projected, Table table) {
         int[] indices = new int[projected.size()];
         for (int i = 0; i < projected.size(); i++)
-            indices[i] = all.indexOf(projected.get(i));
+            indices[i] = table.getColumnIndex(projected.get(i).getName());
 
         List<Map<String, Object>> result = new ArrayList<>(rows.size());
         for (Row row : rows) {
-            Map<String, Object> map = new LinkedHashMap<>(projected.size() * 2);
+            Map<String, Object> map = new HashMap<>(projected.size() * 2);
             for (int i = 0; i < projected.size(); i++)
                 if (indices[i] >= 0) map.put(projected.get(i).getName(), row.getValue(indices[i]));
             result.add(map);
         }
         return result;
+    }
+
+    // heap de taille N évite de trier n éléments pour n'en garder que limit
+    private List<Row> topNRows(List<Row> rows, Table table, String orderBy, String orderDir, int limit) {
+        int idx = table.getColumnIndex(orderBy);
+        if (idx < 0) return rows.subList(0, Math.min(limit, rows.size()));
+
+        boolean desc = "DESC".equalsIgnoreCase(orderDir);
+        Comparator<Row> heapComp = (a, b) -> {
+            int cmp = compareValues(a.getValue(idx), b.getValue(idx));
+            return desc ? cmp : -cmp;
+        };
+
+        PriorityQueue<Row> heap = new PriorityQueue<>(limit + 1, heapComp);
+        for (Row row : rows) {
+            heap.offer(row);
+            if (heap.size() > limit) heap.poll();
+        }
+
+        List<Row> result = new ArrayList<>(heap);
+        result.sort(desc ? heapComp.reversed() : heapComp.reversed().reversed());
+        return result;
+    }
+
+    // parallelSort au-delà de 500k car le surcoût fork-join dépasse le gain pour les petits volumes
+    private void sortRows(List<Row> rows, Table table, String orderBy, String orderDir) {
+        int idx = table.getColumnIndex(orderBy);
+        if (idx < 0) return;
+        boolean desc = "DESC".equalsIgnoreCase(orderDir);
+
+        Comparator<Row> cmp = (a, b) -> {
+            int c = compareValues(a.getValue(idx), b.getValue(idx));
+            return desc ? -c : c;
+        };
+
+        if (rows.size() > 500_000) {
+            Row[] arr = rows.toArray(new Row[0]);
+            Arrays.parallelSort(arr, cmp);
+            for (int i = 0; i < arr.length; i++) rows.set(i, arr[i]);
+        } else {
+            rows.sort(cmp);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private int compareValues(Object va, Object vb) {
+        if (va == null && vb == null) return 0;
+        if (va == null) return 1;
+        if (vb == null) return -1;
+        if (va instanceof Number na && vb instanceof Number nb)
+            return Double.compare(na.doubleValue(), nb.doubleValue());
+        if (va instanceof Comparable ca)
+            return ca.compareTo(vb);
+        return va.toString().compareTo(vb.toString());
+    }
+
+    private void applyOrderByMaps(List<Map<String, Object>> results, String orderBy, String orderDir) {
+        boolean desc = "DESC".equalsIgnoreCase(orderDir);
+        results.sort((a, b) -> {
+            int cmp = compareValues(a.get(orderBy), b.get(orderBy));
+            return desc ? -cmp : cmp;
+        });
     }
 
     private String buildGroupKey(Row row, int[] idx) {
@@ -122,24 +228,37 @@ public class QueryService {
     }
 
     private double sumCol(List<Row> rows, int idx) {
+        if (idx < 0) return 0;
         double s = 0;
-        for (Row r : rows) { Object v = r.getValue(idx); if (v instanceof Number n) s += n.doubleValue(); }
+        for (Row r : rows) {
+            Object v = r.getValue(idx);
+            if (v instanceof Number n) s += n.doubleValue();
+        }
         return s;
     }
 
     private double avgCol(List<Row> rows, int idx) {
-        return rows.isEmpty() ? 0 : sumCol(rows, idx) / rows.size();
+        if (idx < 0 || rows.isEmpty()) return 0;
+        return sumCol(rows, idx) / rows.size();
     }
 
     private Object minCol(List<Row> rows, int idx) {
+        if (idx < 0) return null;
         double m = Double.MAX_VALUE;
-        for (Row r : rows) { Object v = r.getValue(idx); if (v instanceof Number n) m = Math.min(m, n.doubleValue()); }
+        for (Row r : rows) {
+            Object v = r.getValue(idx);
+            if (v instanceof Number n) m = Math.min(m, n.doubleValue());
+        }
         return m == Double.MAX_VALUE ? null : m;
     }
 
     private Object maxCol(List<Row> rows, int idx) {
+        if (idx < 0) return null;
         double m = -Double.MAX_VALUE;
-        for (Row r : rows) { Object v = r.getValue(idx); if (v instanceof Number n) m = Math.max(m, n.doubleValue()); }
+        for (Row r : rows) {
+            Object v = r.getValue(idx);
+            if (v instanceof Number n) m = Math.max(m, n.doubleValue());
+        }
         return m == -Double.MAX_VALUE ? null : m;
     }
 
