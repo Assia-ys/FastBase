@@ -7,6 +7,7 @@ import com.fastbase.service.DataLoaderService;
 import com.fastbase.service.TableService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 
 import java.io.IOException;
@@ -48,12 +49,16 @@ public class TableController {
         return Map.of("message", "Table supprimée avec succès");
     }
 
-    @PostMapping("/load")
-    public Map<String, Object> loadData(@Valid @RequestBody LoadDataRequestDTO request) throws IOException {
+    @PostMapping(value = "/load", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Map<String, Object> loadData(@Valid @ModelAttribute LoadDataRequestDTO request) throws IOException {
+        if (request.getFile().isEmpty()) {
+            throw new IllegalArgumentException("Le fichier est vide");
+        }
+
         long start = System.currentTimeMillis();
         int rows = switch (request.getFormat()) {
-            case CSV     -> dataLoaderService.loadCsvData(request.getTableName(), request.getFilePath());
-            case PARQUET -> dataLoaderService.loadParquetData(request.getTableName(), request.getFilePath());
+            case CSV     -> dataLoaderService.loadCsvData(request.getTableName(), request.getFile().getInputStream());
+            case PARQUET -> dataLoaderService.loadParquetData(request.getTableName(), request.getFile().getInputStream());
         };
         return Map.of("message", "Données chargées", "rowsLoaded", rows, "loadingMs", System.currentTimeMillis() - start);
     }

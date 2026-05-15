@@ -54,6 +54,18 @@
 		</dependency>
 
 		<dependency>
+			<groupId>org.apache.hadoop</groupId>
+			<artifactId>hadoop-mapreduce-client-core</artifactId>
+			<version>3.3.6</version>
+			<exclusions>
+				<exclusion>
+					<groupId>org.slf4j</groupId>
+					<artifactId>slf4j-reload4j</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+
+		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-test</artifactId>
 			<scope>test</scope>
@@ -76,8 +88,8 @@
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-surefire-plugin</artifactId>
 				<configuration>
-					<!-- Heap fixe 2Go : évite les GC intempestifs pendant les benchmarks -->
-					<argLine>-Xms2g -Xmx2g</argLine>
+					<!-- Benchmarks réels jusqu'à 4M lignes : la table est matérialisée en mémoire. -->
+					<argLine>-Xms256m -Xmx3g</argLine>
 				</configuration>
 			</plugin>
 		</plugins>

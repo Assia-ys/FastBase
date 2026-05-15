@@ -69,6 +69,34 @@ public class QueryService {
         return results;
     }
 
+    public long scanSelectCount(String tableName, List<String> selectCols, String whereCondition) {
+        Table table = dataStorage.getTable(tableName)
+                .orElseThrow(() -> new TableNotFoundException(tableName));
+
+        List<Column> projected = resolveColumns(table, selectCols);
+        int[] indices = buildIndices(projected, table);
+        List<Row> rows = table.getRows();
+        Condition cond = whereCondition == null || whereCondition.isBlank()
+                ? null
+                : Condition.parse(whereCondition, table);
+
+        long count = 0;
+        long checksum = 0;
+        for (Row row : rows) {
+            if (cond != null && !cond.matches(row)) continue;
+            for (int idx : indices) {
+                if (idx >= 0) {
+                    Object value = row.getValue(idx);
+                    if (value != null) checksum += value.hashCode();
+                }
+            }
+            count++;
+        }
+
+        if (checksum == Long.MIN_VALUE) System.out.print("");
+        return count;
+    }
+
     // Une seule passe : filtre ET projette sans List<Row> intermédiaire
     private List<Map<String, Object>> filterAndProject(
             Table table, String whereCondition, int[] indices, String[] names) {
