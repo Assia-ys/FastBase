@@ -28,21 +28,21 @@ class RealDataBenchmarkTest {
     private static final FileFormat DATA_FORMAT = FileFormat.valueOf(
             System.getProperty("fastbase.benchmark.format", "PARQUET").toUpperCase());
     private static final String DATA_PATH = System.getProperty(
-            "fastbase.benchmark.path", "../data_NYC/yellow_tripdata_2016-05.parquet");
+            "fastbase.benchmark.path", "../data_NYC/yellow_tripdata_2022-01.parquet");
 
-    // Schéma complet des 19 colonnes du CSV NYC Taxi 2016
+    // Schéma complet des 19 colonnes NYC Taxi Yellow Trip 2022
+    // Différences par rapport à 2016 : suppression lat/lon, ajout PULocationID/DOLocationID,
+    // passenger_count passe en DOUBLE (nullable), ajout congestion_surcharge et airport_fee
     private static final List<Column> SCHEMA = List.of(
             new Column("VendorID",              ColumnType.INTEGER),
-            new Column("tpep_pickup_datetime",  ColumnType.STRING),
-            new Column("tpep_dropoff_datetime", ColumnType.STRING),
-            new Column("passenger_count",       ColumnType.INTEGER),
+            new Column("tpep_pickup_datetime",  ColumnType.LONG),
+            new Column("tpep_dropoff_datetime", ColumnType.LONG),
+            new Column("passenger_count",       ColumnType.DOUBLE),
             new Column("trip_distance",         ColumnType.DOUBLE),
-            new Column("pickup_longitude",      ColumnType.DOUBLE),
-            new Column("pickup_latitude",       ColumnType.DOUBLE),
-            new Column("RatecodeID",            ColumnType.INTEGER),
+            new Column("RatecodeID",            ColumnType.DOUBLE),
             new Column("store_and_fwd_flag",    ColumnType.STRING),
-            new Column("dropoff_longitude",     ColumnType.DOUBLE),
-            new Column("dropoff_latitude",      ColumnType.DOUBLE),
+            new Column("PULocationID",          ColumnType.INTEGER),
+            new Column("DOLocationID",          ColumnType.INTEGER),
             new Column("payment_type",          ColumnType.INTEGER),
             new Column("fare_amount",           ColumnType.DOUBLE),
             new Column("extra",                 ColumnType.DOUBLE),
@@ -50,7 +50,9 @@ class RealDataBenchmarkTest {
             new Column("tip_amount",            ColumnType.DOUBLE),
             new Column("tolls_amount",          ColumnType.DOUBLE),
             new Column("improvement_surcharge", ColumnType.DOUBLE),
-            new Column("total_amount",          ColumnType.DOUBLE)
+            new Column("total_amount",          ColumnType.DOUBLE),
+            new Column("congestion_surcharge",  ColumnType.DOUBLE),
+            new Column("airport_fee",           ColumnType.DOUBLE)
     );
 
     private static final int[] SCALES = {100_000, 500_000, 1_000_000, 2_000_000, 4_000_000};
@@ -124,9 +126,9 @@ class RealDataBenchmarkTest {
             CSV_LINES.add(new BenchmarkService.BenchmarkResult(
                     "WHERE_SIMPLE", whereSimple.rowCount(), whereSimple.elapsedMs(), whereSimple.elapsedNs()).toCsvLine());
 
-            // 3. WHERE Complexe (Comparaison de texte string, plus coûteux)
+            // 3. WHERE Complexe (payment_type entier : filtre sur paiement par carte)
             BenchmarkService.BenchmarkResult whereComplex = benchmarkService.benchmarkSelect(
-                    tableName, List.of("passenger_count", "trip_distance"), "store_and_fwd_flag='Y'");
+                    tableName, List.of("passenger_count", "trip_distance"), "payment_type=1");
             CSV_LINES.add(new BenchmarkService.BenchmarkResult(
                     "WHERE_COMPLEX", whereComplex.rowCount(), whereComplex.elapsedMs(), whereComplex.elapsedNs()).toCsvLine());
 

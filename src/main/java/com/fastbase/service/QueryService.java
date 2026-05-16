@@ -3,14 +3,26 @@ package com.fastbase.service;
 import com.fastbase.exception.InvalidQueryException;
 import com.fastbase.exception.TableNotFoundException;
 import com.fastbase.model.Column;
-import com.fastbase.model.Row;
 import com.fastbase.model.Table;
 import com.fastbase.storage.DataStorage;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
+/**
+ * Moteur de requêtes colonnaire.
+ *
+ * Itère par index de ligne (int r = 0..rowCount) sur les arrays double[][] / String[][]
+ * de Table. Aucun objet Row créé pendant les requêtes → zéro GC pression sur 50M lignes.
+ *
+ * Optimisations :
+ *  - WHERE / SELECT : parallelStream (IntStream.range) si rowCount > 500 000
+ *  - GROUP BY : accumulateur passe unique (GroupAcc)
+ *  - ORDER BY LIMIT : heap O(n log N) avec topN via PriorityQueue<Integer>
+ *  - ORDER BY seul : Arrays.parallelSort sur int[] indices au-delà de 500 000 lignes
+ */
 @Service
 public class QueryService {
 
@@ -20,145 +32,145 @@ public class QueryService {
         this.dataStorage = dataStorage;
     }
 
+    // ── Entrées publiques ──────────────────────────────────────────
+
     public List<Map<String, Object>> execute(
-            String tableName,
-            List<String> selectCols,
-            String whereCondition,
+            String tableName, List<String> selectCols, String whereCondition,
             List<String> groupByCols) {
         return execute(tableName, selectCols, whereCondition, groupByCols, null, null, null);
     }
 
     public List<Map<String, Object>> execute(
-            String tableName,
-            List<String> selectCols,
-            String whereCondition,
-            List<String> groupByCols,
-            String orderBy,
-            String orderDir,
-            Integer limit) {
+            String tableName, List<String> selectCols, String whereCondition,
+            List<String> groupByCols, String orderBy, String orderDir, Integer limit) {
 
         Table table = dataStorage.getTable(tableName)
                 .orElseThrow(() -> new TableNotFoundException(tableName));
 
         List<Map<String, Object>> results;
+
         if (groupByCols != null && !groupByCols.isEmpty()) {
-            List<Row> rows = applyWhere(table, whereCondition);
+            // Si pas de WHERE : passe null pour éviter l'allocation de int[rowCount] = 200 MB sur 50M lignes
+            int[] rows = (whereCondition == null || whereCondition.isBlank())
+                    ? null
+                    : applyWhere(table, whereCondition);
             results = applyGroupBy(table, rows, selectCols, groupByCols);
             if (orderBy != null && !orderBy.isBlank())
                 applyOrderByMaps(results, orderBy, orderDir);
             if (limit != null && limit > 0 && results.size() > limit)
                 results = results.subList(0, limit);
+
         } else if (orderBy != null && !orderBy.isBlank()) {
-            List<Row> rows = applyWhere(table, whereCondition);
-            boolean useHeap = limit != null && limit > 0 && limit < rows.size();
-            if (useHeap)
-                rows = topNRows(rows, table, orderBy, orderDir, limit);
-            else
-                rows = sortRows(rows, table, orderBy, orderDir);
-            results = projectRows(rows, resolveColumns(table, selectCols), table);
+            boolean hasWhere = whereCondition != null && !whereCondition.isBlank();
+            boolean useHeap  = limit != null && limit > 0;
+            if (useHeap && !hasWhere) {
+                // Chemin optimal TOP-N sans WHERE : évite int[rowCount] = 240 MB sur 60M lignes
+                int[] rows = topNRowsDirect(table, orderBy, orderDir, limit);
+                results = projectRows(rows, resolveColumns(table, selectCols), table);
+            } else {
+                int[] rows = applyWhere(table, whereCondition);
+                if (useHeap && limit < rows.length)
+                    rows = topNRows(rows, table, orderBy, orderDir, limit);
+                else
+                    rows = sortRows(rows, table, orderBy, orderDir);
+                results = projectRows(rows, resolveColumns(table, selectCols), table);
+            }
+
         } else {
-            // Pas d'ORDER BY : pipeline filter+project en une seule passe, sans liste intermédiaire
+            // Chemin chaud : filter + project en une seule passe, sans liste intermédiaire
             List<Column> projected = resolveColumns(table, selectCols);
-            int[] indices = buildIndices(projected, table);
-            String[] names  = projected.stream().map(Column::getName).toArray(String[]::new);
-            results = filterAndProject(table, whereCondition, indices, names);
+            int[] colIndices = projected.stream().mapToInt(c -> table.getColumnIndex(c.getName())).toArray();
+            String[] names   = projected.stream().map(Column::getName).toArray(String[]::new);
+            results = filterAndProject(table, whereCondition, colIndices, names);
             if (limit != null && limit > 0 && results.size() > limit)
                 results = results.subList(0, limit);
         }
-
         return results;
     }
 
+    /**
+     * Scan sans matérialisation — pour les benchmarks SELECT (compte + checksum).
+     */
     public long scanSelectCount(String tableName, List<String> selectCols, String whereCondition) {
         Table table = dataStorage.getTable(tableName)
                 .orElseThrow(() -> new TableNotFoundException(tableName));
 
         List<Column> projected = resolveColumns(table, selectCols);
-        int[] indices = buildIndices(projected, table);
-        List<Row> rows = table.getRows();
-        Condition cond = whereCondition == null || whereCondition.isBlank()
-                ? null
-                : Condition.parse(whereCondition, table);
-
-        long count = 0;
-        long checksum = 0;
-        for (Row row : rows) {
-            if (cond != null && !cond.matches(row)) continue;
-            for (int idx : indices) {
-                if (idx >= 0) {
-                    Object value = row.getValue(idx);
-                    if (value != null) checksum += value.hashCode();
-                }
+        int[] colIndices = projected.stream().mapToInt(c -> table.getColumnIndex(c.getName())).toArray();
+        int n = table.getRowCount();
+        Condition cond = parseCondition(whereCondition, table);
+        long count = 0, checksum = 0;
+        for (int r = 0; r < n; r++) {
+            if (cond != null && !cond.matches(r, table)) continue;
+            for (int ci : colIndices) {
+                Object v = table.getValue(r, ci);
+                if (v != null) checksum += v.hashCode();
             }
             count++;
         }
-
-        if (checksum == Long.MIN_VALUE) System.out.print("");
+        if (checksum == Long.MIN_VALUE) System.out.print(""); // évite dead-code elimination
         return count;
     }
 
-    // Une seule passe : filtre ET projette sans List<Row> intermédiaire
+    // ── Filter + project en une passe ─────────────────────────────
+
     private List<Map<String, Object>> filterAndProject(
-            Table table, String whereCondition, int[] indices, String[] names) {
+            Table table, String whereCondition, int[] colIndices, String[] names) {
 
-        List<Row> rows = table.getRows();
+        int n = table.getRowCount();
+        Condition cond = parseCondition(whereCondition, table);
 
-        if (whereCondition == null || whereCondition.isBlank()) {
-            // Pas de filtre : projection pure en parallèle
-            if (rows.size() > 500_000)
-                return rows.parallelStream()
-                        .map(row -> buildMap(row, indices, names))
-                        .collect(Collectors.toList());
-            List<Map<String, Object>> result = new ArrayList<>(rows.size());
-            for (Row row : rows) result.add(buildMap(row, indices, names));
-            return result;
+        if (n > 500_000) {
+            return IntStream.range(0, n).parallel()
+                    .filter(r -> cond == null || cond.matches(r, table))
+                    .mapToObj(r -> buildMap(r, colIndices, names, table))
+                    .collect(Collectors.toList());
         }
 
-        Condition cond = Condition.parse(whereCondition, table);
-        if (rows.size() > 500_000)
-            return rows.parallelStream()
-                    .filter(cond::matches)
-                    .map(row -> buildMap(row, indices, names))
-                    .collect(Collectors.toList());
-
-        List<Map<String, Object>> result = new ArrayList<>();
-        for (Row row : rows)
-            if (cond.matches(row)) result.add(buildMap(row, indices, names));
+        List<Map<String, Object>> result = cond == null
+                ? new ArrayList<>(n) : new ArrayList<>();
+        for (int r = 0; r < n; r++) {
+            if (cond == null || cond.matches(r, table))
+                result.add(buildMap(r, colIndices, names, table));
+        }
         return result;
     }
 
-    private Map<String, Object> buildMap(Row row, int[] indices, String[] names) {
-        Map<String, Object> map = new HashMap<>(indices.length * 2);
-        for (int i = 0; i < indices.length; i++)
-            if (indices[i] >= 0) map.put(names[i], row.getValue(indices[i]));
+    private Map<String, Object> buildMap(int rowIdx, int[] colIndices, String[] names, Table table) {
+        Map<String, Object> map = new HashMap<>(colIndices.length * 2);
+        for (int i = 0; i < colIndices.length; i++)
+            if (colIndices[i] >= 0) map.put(names[i], table.getValue(rowIdx, colIndices[i]));
         return map;
     }
 
-    private int[] buildIndices(List<Column> projected, Table table) {
-        int[] indices = new int[projected.size()];
-        for (int i = 0; i < projected.size(); i++)
-            indices[i] = table.getColumnIndex(projected.get(i).getName());
-        return indices;
+    // ── WHERE ─────────────────────────────────────────────────────
+
+    private int[] applyWhere(Table table, String whereCondition) {
+        int n = table.getRowCount();
+        Condition cond = parseCondition(whereCondition, table);
+        if (cond == null) return IntStream.range(0, n).toArray();
+
+        if (n > 500_000) {
+            return IntStream.range(0, n).parallel()
+                    .filter(r -> cond.matches(r, table))
+                    .toArray();
+        }
+        int[] buf = new int[n];
+        int count = 0;
+        for (int r = 0; r < n; r++)
+            if (cond.matches(r, table)) buf[count++] = r;
+        return count == n ? buf : Arrays.copyOf(buf, count);
     }
 
-    private List<Row> applyWhere(Table table, String whereCondition) {
-        if (whereCondition == null || whereCondition.isBlank())
-            return table.getRows();
-
-        Condition cond = Condition.parse(whereCondition, table);
-        List<Row> rows = table.getRows();
-
-        if (rows.size() > 500_000)
-            return rows.parallelStream().filter(cond::matches).collect(Collectors.toList());
-
-        List<Row> filtered = new ArrayList<>();
-        for (Row row : rows)
-            if (cond.matches(row)) filtered.add(row);
-        return filtered;
+    private static Condition parseCondition(String whereCondition, Table table) {
+        if (whereCondition == null || whereCondition.isBlank()) return null;
+        return Condition.parse(whereCondition, table);
     }
+
+    // ── GROUP BY ──────────────────────────────────────────────────
 
     private List<Map<String, Object>> applyGroupBy(
-            Table table, List<Row> rows, List<String> selectCols, List<String> groupByCols) {
+            Table table, int[] rows, List<String> selectCols, List<String> groupByCols) {
 
         int[] groupIdx = new int[groupByCols.size()];
         for (int i = 0; i < groupByCols.size(); i++) {
@@ -167,7 +179,6 @@ public class QueryService {
                 throw new InvalidQueryException("Colonne GROUP BY introuvable : " + groupByCols.get(i));
         }
 
-        // Prépare les infos sur chaque agrégat : expression, type, index colonne
         record AggInfo(String col, String type, int colIdx) {}
         List<AggInfo> aggs = new ArrayList<>();
         if (selectCols != null) {
@@ -179,53 +190,100 @@ public class QueryService {
                            up.startsWith("MIN(") || up.startsWith("MAX(")) {
                     String type = up.substring(0, up.indexOf('('));
                     int idx = table.getColumnIndex(extractArg(col));
-                    if (idx < 0) throw new InvalidQueryException("Colonne d'agrégat introuvable : " + extractArg(col));
+                    if (idx < 0) throw new InvalidQueryException("Colonne agrégat introuvable : " + extractArg(col));
                     aggs.add(new AggInfo(col, type, idx));
                 }
             }
         }
         int nAcc = (int) aggs.stream().filter(a -> !a.type().equals("COUNT")).count();
-
-        // Numérotation des slots accumulateur (COUNT n'a pas de slot — utilise .count)
         int[] slot = new int[aggs.size()];
         int s = 0;
-        for (int i = 0; i < aggs.size(); i++)
-            slot[i] = aggs.get(i).type().equals("COUNT") ? -1 : s++;
+        for (int i = 0; i < aggs.size(); i++) slot[i] = aggs.get(i).type().equals("COUNT") ? -1 : s++;
 
-        // PASSE UNIQUE : accumulation directe sans stocker les rows
+        // Optimisation clé de groupe :
+        // - 1 colonne numérique → Long key (bits du double), ZÉRO allocation par ligne sur 50M lignes
+        // - sinon → String key (quelques milliers de groupes au plus)
+        boolean numericKey = groupIdx.length == 1 && table.isNumericColumn(groupIdx[0]);
+
+        // rows == null signifie "toutes les lignes" (pas de WHERE → évite int[50M] = 200 MB)
+        int rowCount  = rows != null ? rows.length : table.getRowCount();
+
+        if (numericKey) {
+            // Chemin chaud GROUP BY colonne numérique : Long key, aucune String créée
+            Map<Long, GroupAcc> groups = new HashMap<>();
+            for (int i = 0; i < rowCount; i++) {
+                int r = rows != null ? rows[i] : i;
+                long key = Double.doubleToRawLongBits(table.getNumericRaw(groupIdx[0], r));
+                GroupAcc acc = groups.get(key);
+                if (acc == null) {
+                    Object[] gv = new Object[]{ table.getValue(r, groupIdx[0]) };
+                    acc = new GroupAcc(gv, nAcc);
+                    groups.put(key, acc);
+                }
+                acc.count++;
+                for (int j = 0; j < aggs.size(); j++) {
+                    if (slot[j] < 0) continue;
+                    double d = table.getNumericRaw(aggs.get(j).colIdx(), r);
+                    if (!Double.isNaN(d)) {
+                        acc.sums[slot[j]] += d;
+                        if (d < acc.mins[slot[j]]) acc.mins[slot[j]] = d;
+                        if (d > acc.maxs[slot[j]]) acc.maxs[slot[j]] = d;
+                        acc.hasVal[slot[j]] = true;
+                    }
+                }
+            }
+            // Construction des résultats depuis les accumulateurs (clé numérique)
+            List<Map<String, Object>> numResults = new ArrayList<>(groups.size());
+            for (GroupAcc acc : groups.values()) {
+                Map<String, Object> result = new HashMap<>();
+                result.put(groupByCols.get(0), acc.groupVals[0]);
+                for (int j = 0; j < aggs.size(); j++) {
+                    AggInfo ai = aggs.get(j); int si = slot[j];
+                    switch (ai.type()) {
+                        case "COUNT" -> result.put(ai.col(), acc.count);
+                        case "SUM"   -> result.put(ai.col(), acc.hasVal[si] ? acc.sums[si] : 0.0);
+                        case "AVG"   -> result.put(ai.col(), acc.count > 0 ? acc.sums[si]/acc.count : 0.0);
+                        case "MIN"   -> result.put(ai.col(), acc.hasVal[si] ? acc.mins[si] : null);
+                        case "MAX"   -> result.put(ai.col(), acc.hasVal[si] ? acc.maxs[si] : null);
+                    }
+                }
+                numResults.add(result);
+            }
+            return numResults;
+        }
+
+        // Chemin général : String key (GROUP BY sur colonne texte ou multi-colonnes)
         Map<String, GroupAcc> groups = new HashMap<>();
-        for (Row row : rows) {
-            String key = buildGroupKey(row, groupIdx);
+        for (int i = 0; i < rowCount; i++) {
+            int r = rows != null ? rows[i] : i;
+            String key = buildGroupKey(r, table, groupIdx);
             GroupAcc acc = groups.get(key);
             if (acc == null) {
                 Object[] gv = new Object[groupIdx.length];
-                for (int i = 0; i < groupIdx.length; i++) gv[i] = row.getValue(groupIdx[i]);
+                for (int j = 0; j < groupIdx.length; j++) gv[j] = table.getValue(r, groupIdx[j]);
                 acc = new GroupAcc(gv, nAcc);
                 groups.put(key, acc);
             }
             acc.count++;
-            for (int i = 0; i < aggs.size(); i++) {
-                if (slot[i] < 0) continue;
-                Object v = row.getValue(aggs.get(i).colIdx());
-                if (v instanceof Number n) {
-                    double d = n.doubleValue();
-                    acc.sums[slot[i]] += d;
-                    if (d < acc.mins[slot[i]]) acc.mins[slot[i]] = d;
-                    if (d > acc.maxs[slot[i]]) acc.maxs[slot[i]] = d;
-                    acc.hasVal[slot[i]] = true;
+            for (int j = 0; j < aggs.size(); j++) {
+                if (slot[j] < 0) continue;
+                Object v = table.getValue(r, aggs.get(j).colIdx());
+                if (v instanceof Number n2) {
+                    double d = n2.doubleValue();
+                    acc.sums[slot[j]] += d;
+                    if (d < acc.mins[slot[j]]) acc.mins[slot[j]] = d;
+                    if (d > acc.maxs[slot[j]]) acc.maxs[slot[j]] = d;
+                    acc.hasVal[slot[j]] = true;
                 }
             }
         }
 
-        // Construction des résultats depuis les accumulateurs
         List<Map<String, Object>> results = new ArrayList<>(groups.size());
         for (GroupAcc acc : groups.values()) {
             Map<String, Object> result = new HashMap<>();
-            for (int i = 0; i < groupByCols.size(); i++)
-                result.put(groupByCols.get(i), acc.groupVals[i]);
+            for (int i = 0; i < groupByCols.size(); i++) result.put(groupByCols.get(i), acc.groupVals[i]);
             for (int i = 0; i < aggs.size(); i++) {
-                AggInfo ai = aggs.get(i);
-                int si = slot[i];
+                AggInfo ai = aggs.get(i); int si = slot[i];
                 switch (ai.type()) {
                     case "COUNT" -> result.put(ai.col(), acc.count);
                     case "SUM"   -> result.put(ai.col(), acc.hasVal[si] ? acc.sums[si] : 0.0);
@@ -240,23 +298,114 @@ public class QueryService {
     }
 
     private static class GroupAcc {
-        final Object[] groupVals;
-        long count = 0;
-        final double[] sums;
-        final double[] mins;
-        final double[] maxs;
-        final boolean[] hasVal;
-
-        GroupAcc(Object[] groupVals, int nAcc) {
-            this.groupVals = groupVals;
-            this.sums   = new double[nAcc];
-            this.mins   = new double[nAcc];
-            this.maxs   = new double[nAcc];
-            this.hasVal = new boolean[nAcc];
-            Arrays.fill(mins, Double.MAX_VALUE);
-            Arrays.fill(maxs, -Double.MAX_VALUE);
+        final Object[] groupVals; long count = 0;
+        final double[] sums, mins, maxs; final boolean[] hasVal;
+        GroupAcc(Object[] gv, int nAcc) {
+            groupVals = gv; sums = new double[nAcc]; mins = new double[nAcc];
+            maxs = new double[nAcc]; hasVal = new boolean[nAcc];
+            Arrays.fill(mins, Double.MAX_VALUE); Arrays.fill(maxs, -Double.MAX_VALUE);
         }
     }
+
+    // ── ORDER BY / TOP-N ──────────────────────────────────────────
+
+    private int[] sortRows(int[] rows, Table table, String orderBy, String orderDir) {
+        int idx = table.getColumnIndex(orderBy);
+        if (idx < 0) return rows;
+        boolean desc = "DESC".equalsIgnoreCase(orderDir);
+        if (rows.length > 500_000) {
+            Integer[] boxed = IntStream.of(rows).boxed().toArray(Integer[]::new);
+            Arrays.parallelSort(boxed, (a, b) -> {
+                int c = compareValues(table.getValue(a, idx), table.getValue(b, idx));
+                return desc ? -c : c;
+            });
+            return IntStream.of(Arrays.stream(boxed).mapToInt(Integer::intValue).toArray()).toArray();
+        }
+        Integer[] boxed = IntStream.of(rows).boxed().toArray(Integer[]::new);
+        Arrays.sort(boxed, (a, b) -> {
+            int c = compareValues(table.getValue(a, idx), table.getValue(b, idx));
+            return desc ? -c : c;
+        });
+        return Arrays.stream(boxed).mapToInt(Integer::intValue).toArray();
+    }
+
+    /**
+     * TOP-N sans WHERE — itère 0..rowCount sans créer int[rowCount] (240 MB à 60M lignes).
+     * Pour colonnes numériques : comparateur via getNumericRaw() → zéro boxing Double.
+     */
+    private int[] topNRowsDirect(Table table, String orderBy, String orderDir, int limit) {
+        int colIdx = table.getColumnIndex(orderBy);
+        int n      = table.getRowCount();
+        int actual = Math.min(limit, n);
+        if (colIdx < 0 || n == 0) {
+            int[] r = new int[actual]; for (int i = 0; i < actual; i++) r[i] = i; return r;
+        }
+        boolean desc    = "DESC".equalsIgnoreCase(orderDir);
+        boolean numeric = table.isNumericColumn(colIdx);
+
+        // Min-heap de taille `limit` : la racine est le "pire" des top-N
+        // DESC → on garde les plus grandes valeurs → racine = plus petite (min-heap normal)
+        // ASC  → on garde les plus petites valeurs → racine = plus grande (max-heap = min-heap inversé)
+        Comparator<Integer> heapComp = numeric
+            ? (a, b) -> { double c = table.getNumericRaw(colIdx, a) - table.getNumericRaw(colIdx, b);
+                          return desc ? (c < 0 ? -1 : c > 0 ? 1 : 0) : (c < 0 ? 1 : c > 0 ? -1 : 0); }
+            : (a, b) -> { int c = compareValues(table.getValue(a, colIdx), table.getValue(b, colIdx));
+                          return desc ? c : -c; };
+
+        PriorityQueue<Integer> heap = new PriorityQueue<>(actual + 1, heapComp);
+        for (int r = 0; r < n; r++) {
+            heap.offer(r);
+            if (heap.size() > limit) heap.poll();
+        }
+        List<Integer> result = new ArrayList<>(heap);
+        result.sort(heapComp.reversed());
+        return result.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    private int[] topNRows(int[] rows, Table table, String orderBy, String orderDir, int limit) {
+        int idx = table.getColumnIndex(orderBy);
+        if (idx < 0) return Arrays.copyOf(rows, Math.min(limit, rows.length));
+        boolean desc = "DESC".equalsIgnoreCase(orderDir);
+        Comparator<Integer> heapComp = (a, b) -> {
+            int c = compareValues(table.getValue(a, idx), table.getValue(b, idx));
+            return desc ? c : -c;
+        };
+        PriorityQueue<Integer> heap;
+        if (rows.length > 500_000) {
+            heap = IntStream.of(rows).parallel().boxed().collect(
+                () -> new PriorityQueue<>(limit + 1, heapComp),
+                (h, r) -> { h.offer(r); if (h.size() > limit) h.poll(); },
+                (h1, h2) -> { for (int r : h2) { h1.offer(r); if (h1.size() > limit) h1.poll(); } });
+        } else {
+            heap = new PriorityQueue<>(limit + 1, heapComp);
+            for (int r : rows) { heap.offer(r); if (heap.size() > limit) heap.poll(); }
+        }
+        List<Integer> result = new ArrayList<>(heap);
+        result.sort(heapComp.reversed());
+        return result.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    private List<Map<String, Object>> projectRows(int[] rows, List<Column> projected, Table table) {
+        int[] colIndices = projected.stream().mapToInt(c -> table.getColumnIndex(c.getName())).toArray();
+        String[] names   = projected.stream().map(Column::getName).toArray(String[]::new);
+        if (rows.length > 500_000)
+            return IntStream.of(rows).parallel()
+                    .mapToObj(r -> buildMap(r, colIndices, names, table))
+                    .collect(Collectors.toList());
+        List<Map<String, Object>> result = new ArrayList<>(rows.length);
+        for (int r : rows) result.add(buildMap(r, colIndices, names, table));
+        return result;
+    }
+
+    private void applyOrderByMaps(List<Map<String, Object>> results, String orderBy, String orderDir) {
+        boolean desc = "DESC".equalsIgnoreCase(orderDir);
+        results.sort((a, b) -> {
+            int c = compareValues(a.get(orderBy), b.get(orderBy));
+            return desc ? -c : c;
+        });
+    }
+
+    // ── Utilitaires ───────────────────────────────────────────────
 
     private List<Column> resolveColumns(Table table, List<String> selectCols) {
         if (selectCols == null || selectCols.isEmpty() || selectCols.contains("*"))
@@ -269,90 +418,9 @@ public class QueryService {
         return result;
     }
 
-    private List<Map<String, Object>> projectRows(List<Row> rows, List<Column> projected, Table table) {
-        int[] indices = buildIndices(projected, table);
-        String[] names = projected.stream().map(Column::getName).toArray(String[]::new);
-        if (rows.size() > 500_000)
-            return rows.parallelStream().map(row -> buildMap(row, indices, names)).collect(Collectors.toList());
-        List<Map<String, Object>> result = new ArrayList<>(rows.size());
-        for (Row row : rows) result.add(buildMap(row, indices, names));
-        return result;
-    }
-
-    // heap de taille N évite de trier n éléments pour n'en garder que limit
-    private List<Row> topNRows(List<Row> rows, Table table, String orderBy, String orderDir, int limit) {
-        int idx = table.getColumnIndex(orderBy);
-        if (idx < 0) return rows.subList(0, Math.min(limit, rows.size()));
-
-        boolean desc = "DESC".equalsIgnoreCase(orderDir);
-        Comparator<Row> heapComp = (a, b) -> {
-            int cmp = compareValues(a.getValue(idx), b.getValue(idx));
-            return desc ? cmp : -cmp;
-        };
-
-        PriorityQueue<Row> heap;
-
-        if (rows.size() > 500_000) {
-            // Chaque thread maintient son propre heap — zéro contention, merge final trivial
-            heap = rows.parallelStream().collect(
-                () -> new PriorityQueue<>(limit + 1, heapComp),
-                (h, row) -> { h.offer(row); if (h.size() > limit) h.poll(); },
-                (h1, h2) -> { for (Row r : h2) { h1.offer(r); if (h1.size() > limit) h1.poll(); } }
-            );
-        } else {
-            heap = new PriorityQueue<>(limit + 1, heapComp);
-            for (Row row : rows) { heap.offer(row); if (heap.size() > limit) heap.poll(); }
-        }
-
-        List<Row> result = new ArrayList<>(heap);
-        result.sort(heapComp.reversed());
-        return result;
-    }
-
-    // parallelSort au-delà de 500k car le surcoût fork-join dépasse le gain pour les petits volumes
-    private List<Row> sortRows(List<Row> rows, Table table, String orderBy, String orderDir) {
-        int idx = table.getColumnIndex(orderBy);
-        if (idx < 0) return rows;
-        boolean desc = "DESC".equalsIgnoreCase(orderDir);
-
-        Comparator<Row> cmp = (a, b) -> {
-            int c = compareValues(a.getValue(idx), b.getValue(idx));
-            return desc ? -c : c;
-        };
-
-        if (rows.size() > 500_000) {
-            Row[] arr = rows.toArray(new Row[0]);
-            Arrays.parallelSort(arr, cmp);
-            return Arrays.asList(arr); // O(1) — enveloppe le tableau sans copie
-        }
-
-        rows.sort(cmp);
-        return rows;
-    }
-
-    @SuppressWarnings("unchecked")
-    private int compareValues(Object va, Object vb) {
-        if (va == null && vb == null) return 0;
-        if (va == null) return 1;
-        if (vb == null) return -1;
-        if (va instanceof Number na && vb instanceof Number nb)
-            return Double.compare(na.doubleValue(), nb.doubleValue());
-        if (va instanceof Comparable ca)
-            return ca.compareTo(vb);
-        return va.toString().compareTo(vb.toString());
-    }
-
-    private void applyOrderByMaps(List<Map<String, Object>> results, String orderBy, String orderDir) {
-        boolean desc = "DESC".equalsIgnoreCase(orderDir);
-        results.sort((a, b) -> {
-            int cmp = compareValues(a.get(orderBy), b.get(orderBy));
-            return desc ? -cmp : cmp;
-        });
-    }
-
-    private String buildGroupKey(Row row, int[] idx) {
+    private String buildGroupKey(int rowIdx, Table table, int[] idx) {
         StringBuilder sb = new StringBuilder();
-        for (int i : idx) sb.append(row.getValue(i)).append('|');
+        for (int i : idx) sb.append(table.getValue(rowIdx, i)).append('|');
         return sb.toString();
     }
 
@@ -360,64 +428,32 @@ public class QueryService {
         return expr.substring(expr.indexOf('(') + 1, expr.indexOf(')')).trim();
     }
 
-    private double sumCol(List<Row> rows, int idx) {
-        if (idx < 0) return 0;
-        double s = 0;
-        for (Row r : rows) {
-            Object v = r.getValue(idx);
-            if (v instanceof Number n) s += n.doubleValue();
-        }
-        return s;
+    @SuppressWarnings("unchecked")
+    private int compareValues(Object va, Object vb) {
+        if (va == null && vb == null) return 0;
+        if (va == null) return 1; if (vb == null) return -1;
+        if (va instanceof Number na && vb instanceof Number nb)
+            return Double.compare(na.doubleValue(), nb.doubleValue());
+        if (va instanceof Comparable ca) return ca.compareTo(vb);
+        return va.toString().compareTo(vb.toString());
     }
 
-    private double avgCol(List<Row> rows, int idx) {
-        if (idx < 0 || rows.isEmpty()) return 0;
-        return sumCol(rows, idx) / rows.size();
-    }
-
-    private Object minCol(List<Row> rows, int idx) {
-        if (idx < 0) return null;
-        double m = Double.MAX_VALUE;
-        for (Row r : rows) {
-            Object v = r.getValue(idx);
-            if (v instanceof Number n) m = Math.min(m, n.doubleValue());
-        }
-        return m == Double.MAX_VALUE ? null : m;
-    }
-
-    private Object maxCol(List<Row> rows, int idx) {
-        if (idx < 0) return null;
-        double m = -Double.MAX_VALUE;
-        for (Row r : rows) {
-            Object v = r.getValue(idx);
-            if (v instanceof Number n) m = Math.max(m, n.doubleValue());
-        }
-        return m == -Double.MAX_VALUE ? null : m;
-    }
-
-    // ---------------------------------------------------------------
-    // Système de conditions WHERE : Condition, AndCondition, OrCondition, SimpleCondition
-    // Parsé une fois, évalué des millions de fois sans allocation
-    // AND a la priorité sur OR (standard SQL)
-    // ---------------------------------------------------------------
+    // ── Conditions WHERE ──────────────────────────────────────────
 
     private interface Condition {
-        boolean matches(Row row);
+        boolean matches(int rowIdx, Table table);
 
         static Condition parse(String expr, Table table) {
-            // Split sur OR en premier (priorité basse)
             String[] orParts = expr.split("(?i)\\s+OR\\s+");
             if (orParts.length > 1) {
                 Condition[] conds = new Condition[orParts.length];
-                for (int i = 0; i < orParts.length; i++)
-                    conds[i] = parseAnd(orParts[i], table);
+                for (int i = 0; i < orParts.length; i++) conds[i] = parseAnd(orParts[i], table);
                 return new OrCondition(conds);
             }
             return parseAnd(expr, table);
         }
 
         static Condition parseAnd(String expr, Table table) {
-            // Split sur AND (priorité haute)
             String[] andParts = expr.split("(?i)\\s+AND\\s+");
             if (andParts.length > 1) {
                 Condition[] conds = new Condition[andParts.length];
@@ -429,36 +465,31 @@ public class QueryService {
         }
     }
 
-    // Court-circuit : s'arrête dès qu'une condition est fausse
     private record AndCondition(Condition[] conds) implements Condition {
-        public boolean matches(Row row) {
-            for (Condition c : conds) if (!c.matches(row)) return false;
+        public boolean matches(int r, Table t) {
+            for (Condition c : conds) if (!c.matches(r, t)) return false;
             return true;
         }
     }
 
-    // Court-circuit : s'arrête dès qu'une condition est vraie
     private record OrCondition(Condition[] conds) implements Condition {
-        public boolean matches(Row row) {
-            for (Condition c : conds) if (c.matches(row)) return true;
+        public boolean matches(int r, Table t) {
+            for (Condition c : conds) if (c.matches(r, t)) return true;
             return false;
         }
     }
 
     private static class SimpleCondition implements Condition {
-
         enum Op { EQ, NEQ, LT, LTE, GT, GTE, LIKE }
 
-        final int colIndex;
-        final Op op;
+        final int    colIndex;
+        final Op     op;
         final String raw;
         final double num;
         final boolean isNum;
 
         SimpleCondition(int colIndex, Op op, String raw) {
-            this.colIndex = colIndex;
-            this.op       = op;
-            this.raw      = raw;
+            this.colIndex = colIndex; this.op = op; this.raw = raw;
             double d = 0; boolean b = false;
             try { d = Double.parseDouble(raw); b = true; } catch (NumberFormatException ignored) {}
             this.num = d; this.isNum = b;
@@ -467,16 +498,15 @@ public class QueryService {
         static SimpleCondition parse(String condition, Table table) {
             String trimmed = condition.trim();
             String upper   = trimmed.toUpperCase();
-
             int likePos = upper.indexOf(" LIKE ");
             if (likePos >= 0)
                 return make(trimmed.substring(0, likePos), Op.LIKE, trimmed.substring(likePos + 6), table);
-
-            String[][] ops = {{"<=", "LTE"}, {">=", "GTE"}, {"!=", "NEQ"}, {"<", "LT"}, {">", "GT"}, {"=", "EQ"}};
+            String[][] ops = {{"<=","LTE"},{">=","GTE"},{"!=","NEQ"},{"<","LT"},{">","GT"},{"=","EQ"}};
             for (String[] pair : ops) {
                 int pos = trimmed.indexOf(pair[0]);
                 if (pos > 0)
-                    return make(trimmed.substring(0, pos), Op.valueOf(pair[1]), trimmed.substring(pos + pair[0].length()), table);
+                    return make(trimmed.substring(0, pos), Op.valueOf(pair[1]),
+                                trimmed.substring(pos + pair[0].length()), table);
             }
             throw new InvalidQueryException("Condition WHERE non reconnue : " + condition);
         }
@@ -484,35 +514,35 @@ public class QueryService {
         private static SimpleCondition make(String col, Op op, String val, Table table) {
             int idx = table.getColumnIndex(col.trim());
             if (idx < 0) throw new InvalidQueryException("Colonne WHERE introuvable : " + col.trim());
-            return new SimpleCondition(idx, op, val.trim());
+            String clean = val.trim();
+            // Supprime les guillemets encadrants : 'Y' → Y
+            if (clean.length() >= 2 &&
+                ((clean.charAt(0) == '\'' && clean.charAt(clean.length()-1) == '\'') ||
+                 (clean.charAt(0) == '"'  && clean.charAt(clean.length()-1) == '"')))
+                clean = clean.substring(1, clean.length() - 1);
+            return new SimpleCondition(idx, op, clean);
         }
 
-        public boolean matches(Row row) {
-            Object cell = row.getValue(colIndex);
+        public boolean matches(int rowIdx, Table table) {
+            Object cell = table.getValue(rowIdx, colIndex);
             if (cell == null) return false;
-
             if (op == Op.LIKE) {
                 String s = cell.toString().toLowerCase();
                 String p = raw.toLowerCase();
-                if (p.startsWith("%") && p.endsWith("%")) return s.contains(p.substring(1, p.length() - 1));
+                if (p.startsWith("%") && p.endsWith("%")) return s.contains(p.substring(1, p.length()-1));
                 if (p.startsWith("%")) return s.endsWith(p.substring(1));
-                if (p.endsWith("%"))   return s.startsWith(p.substring(0, p.length() - 1));
+                if (p.endsWith("%"))   return s.startsWith(p.substring(0, p.length()-1));
                 return s.equals(p);
             }
-
             if (isNum && cell instanceof Number n) {
                 double v = n.doubleValue();
                 return switch (op) {
-                    case EQ  -> v == num;
-                    case NEQ -> v != num;
-                    case LT  -> v <  num;
-                    case LTE -> v <= num;
-                    case GT  -> v >  num;
-                    case GTE -> v >= num;
-                    default  -> false;
+                    case EQ -> v == num; case NEQ -> v != num;
+                    case LT -> v <  num; case LTE -> v <= num;
+                    case GT -> v >  num; case GTE -> v >= num;
+                    default -> false;
                 };
             }
-
             String s = cell.toString();
             return switch (op) {
                 case EQ  -> s.equalsIgnoreCase(raw);

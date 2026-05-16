@@ -1,10 +1,14 @@
 package com.fastbase.model;
 
 import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
 
+/**
+ * Ligne legacy — utilisée uniquement par les tests synthétiques (BenchmarkServiceTest etc.)
+ * qui créent new Row(int) et appellent setValue/getValue.
+ *
+ * Le stockage réel des données est désormais colonnaire dans Table (double[][] + String[][]).
+ * DataLoaderService écrit directement dans Table.setColumnValue() sans créer de Row.
+ */
 public class Row {
 
     private final Object[] values;
@@ -24,9 +28,8 @@ public class Row {
     public void setValue(int columnIndex, Object value) {
         values[columnIndex] = value;
     }
-    public Object[] getValues() {
-        return values;
-    }
+
+    public Object[] getValues() { return values; }
 
     @Override
     public String toString() {

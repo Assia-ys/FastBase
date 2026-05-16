@@ -89,7 +89,7 @@
 				<artifactId>maven-surefire-plugin</artifactId>
 				<configuration>
 					<!-- Benchmarks réels jusqu'à 4M lignes : la table est matérialisée en mémoire. -->
-					<argLine>-Xms256m -Xmx3g</argLine>
+					<argLine>-Xms512m -Xmx12g -XX:+UseG1GC -XX:MaxGCPauseMillis=200</argLine>
 				</configuration>
 			</plugin>
 		</plugins>
