@@ -587,7 +587,7 @@ public class QueryService {
             this.num = d; this.isNum = b;
         }
 
-        static SimpleCondition parse(String condition, Table table) {
+        static Condition parse(String condition, Table table) {
             String trimmed = condition.trim();
             String upper   = trimmed.toUpperCase();
             int likePos = upper.indexOf(" LIKE ");

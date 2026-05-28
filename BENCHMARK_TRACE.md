@@ -2,15 +2,10 @@
 
 | Paramètre | Valeur |
 |-----------|--------|
-| Date      | `2026-05-28 16:07:28` |
+| Date      | `2026-05-28 16:33:36` |
 | Fichier   | `yellow_tripdata_combined.parquet` |
-<<<<<<< HEAD
 | Lignes totales | 70 560 406 |
 | Heap max JVM   | 10 240 MB |
-=======
-| Lignes totales | 70 560 406 |
-| Heap max JVM   | 4 014 MB |
->>>>>>> a74f545f4a85e1ea90271fadc3f06b63cfe39c79
 | CPUs           | 12 |
 | Stockage       | `int[]` / `long[]` / `float[]` colonnaire |
 | Colonnes       | 19 (4×INTEGER, 2×LONG, 12×DOUBLE→float, 1×STRING) |
@@ -18,7 +13,6 @@
 
 ---
 
-<<<<<<< HEAD
 ## Optimisations appliquées et gains obtenus
 
 ### 1. Stockage colonnaire typé (`Table.java`)
@@ -129,137 +123,61 @@ applyGroupBy(table, null, ...); // for (int i = 0; i < rowCount; i++)
 
 | Lignes | LOAD (ms) | R1 (ms) | R2 (ms) | R3 (ms) | R4 (ms) | Heap (MB) | Note |
 |-------:|----------:|--------:|--------:|--------:|--------:|----------:|------|
-| 1 000 000 | 2658 | 164 | 281 | 319 | 419 | 593 | heap Δ: +542 MB |
-| 2 000 000 | 1785 | 79 | 330 | 64 | 39 | 519 | heap Δ: +318 MB |
-| 4 000 000 | 1946 | 156 | 138 | 130 | 78 | 1112 | heap Δ: +389 MB |
-| 6 000 000 | 2102 | 186 | 189 | 182 | 122 | 1404 | heap Δ: +482 MB |
-| 8 000 000 | 2036 | 258 | 238 | 254 | 155 | 1430 | heap Δ: +399 MB |
-| 10 000 000 | 1956 | 330 | 295 | 318 | 195 | 1414 | heap Δ: +195 MB |
-| 12 000 000 | 2097 | 391 | 373 | 365 | 240 | 1659 | heap Δ: +88 MB |
-| 14 000 000 | 1996 | 463 | 426 | 434 | 273 | 1924 | heap Δ: +620 MB |
-| 16 000 000 | 2071 | 526 | 517 | 494 | 310 | 2057 | heap Δ: +564 MB |
-| 18 000 000 | 2094 | 621 | 552 | 558 | 359 | 2178 | heap Δ: +-127 MB |
-| 20 000 000 | 2176 | 697 | 606 | 623 | 380 | 2473 | heap Δ: +439 MB |
-| 22 000 000 | 2119 | 756 | 703 | 695 | 421 | 2506 | heap Δ: +-101 MB |
-| 24 000 000 | 2293 | 830 | 774 | 759 | 462 | 2782 | heap Δ: +226 MB |
-| 26 000 000 | 2321 | 898 | 1015 | 979 | 668 | 3141 | heap Δ: +201 MB |
-| 28 000 000 | 2767 | 1022 | 928 | 991 | 579 | 3971 | heap Δ: +1060 MB |
-| 30 000 000 | 2609 | 1072 | 1026 | 1027 | 589 | 4338 | heap Δ: +656 MB |
-| 32 000 000 | 2402 | 1149 | 1063 | 1080 | 644 | 4412 | heap Δ: +-98 MB |
-| 34 000 000 | 2379 | 1225 | 1114 | 1157 | 705 | 3647 | heap Δ: +-189 MB |
-| 36 000 000 | 2478 | 1301 | 1176 | 1233 | 725 | 4477 | heap Δ: +786 MB |
-| 38 000 000 | 2509 | 1342 | 1263 | 1314 | 777 | 4586 | heap Δ: +234 MB |
-| 40 000 000 | 2509 | 1477 | 1390 | 1382 | 815 | 4290 | heap Δ: +-261 MB |
-| 42 000 000 | 2540 | 1512 | 1389 | 1462 | 888 | 4654 | heap Δ: +125 MB |
-| 44 000 000 | 2654 | 1661 | 2024 | 2068 | 1755 | 4747 | heap Δ: +201 MB |
-| 46 000 000 | 4374 | 2088 | 2181 | 2248 | 1184 | 5591 | heap Δ: +394 MB |
-| 48 000 000 | 3153 | 2132 | 1922 | 1990 | 1169 | 5132 | heap Δ: +-1083 MB |
-| 50 000 000 | 2961 | 1885 | 1836 | 1849 | 1107 | 6660 | heap Δ: +1127 MB |
-| 52 000 000 | 2848 | 2050 | 1989 | 1987 | 1160 | 6808 | heap Δ: +1481 MB |
-| 54 000 000 | 2936 | 2068 | 2094 | 2116 | 1204 | 6548 | heap Δ: +257 MB |
-| 56 000 000 | 3035 | 2281 | 2160 | 2214 | 1235 | 6121 | heap Δ: +-505 MB |
-| 58 000 000 | 2932 | 2225 | 2128 | 2184 | 1399 | 6181 | heap Δ: +-992 MB |
-| 60 000 000 | 3034 | 2294 | 2185 | 2279 | 1328 | 6698 | heap Δ: +114 MB |
-| 62 000 000 | 2979 | 2386 | 2274 | 2335 | 1353 | 7098 | heap Δ: +128 MB |
-| 64 000 000 | 3034 | 2496 | 2416 | 2469 | 1440 | 7116 | heap Δ: +573 MB |
-| 66 000 000 | 3062 | 2562 | 3355 | 4099 | 2058 | 7342 | heap Δ: +131 MB |
-| 68 000 000 | 5730 | 4291 | 3981 | 3987 | 3665 | 8037 | heap Δ: +165 MB |
-| 70 000 000 | 7130 | 4717 | 4109 | 4460 | 2058 | 8082 | heap Δ: +-732 MB |
-| 70 560 406 | 2410 | 10462 | 6473 | 4666 | 2422 | 8595 | heap Δ: +1927 MB |
+| 1 000 000 | 2079 | 173 | 198 | 294 | 28 | 253 | heap Δ: +177 MB |
+| 2 000 000 | 3289 | 32 | 274 | 170 | 14 | 752 | heap Δ: +368 MB |
+| 4 000 000 | 5728 | 25 | 187 | 192 | 22 | 671 | heap Δ: +259 MB |
+| 6 000 000 | 8012 | 79 | 291 | 288 | 38 | 1397 | heap Δ: +334 MB |
+| 8 000 000 | 10462 | 60 | 424 | 380 | 33 | 1024 | heap Δ: +-182 MB |
+| 10 000 000 | 12728 | 192 | 522 | 466 | 69 | 1791 | heap Δ: +5 MB |
+| 12 000 000 | 15021 | 91 | 615 | 607 | 85 | 1420 | heap Δ: +123 MB |
+| 14 000 000 | 17361 | 117 | 765 | 656 | 73 | 1624 | heap Δ: +202 MB |
+| 16 000 000 | 19961 | 220 | 932 | 825 | 159 | 2020 | heap Δ: +375 MB |
+| 18 000 000 | 22362 | 202 | 961 | 834 | 126 | 2370 | heap Δ: +290 MB |
+| 20 000 000 | 24918 | 376 | 1140 | 1002 | 88 | 2438 | heap Δ: +122 MB |
+| 22 000 000 | 27631 | 157 | 1181 | 1035 | 134 | 2709 | heap Δ: +-26 MB |
+| 24 000 000 | 30304 | 188 | 1212 | 1124 | 90 | 2942 | heap Δ: +250 MB |
+| 26 000 000 | 32781 | 361 | 1496 | 1299 | 143 | 3381 | heap Δ: +88 MB |
+| 28 000 000 | 35340 | 566 | 1455 | 1309 | 115 | 3358 | heap Δ: +586 MB |
+| 30 000 000 | 38225 | 615 | 1874 | 1650 | 287 | 3431 | heap Δ: +586 MB |
+| 32 000 000 | 40948 | 387 | 1908 | 1623 | 150 | 3397 | heap Δ: +117 MB |
+| 34 000 000 | 44154 | 267 | 1870 | 1653 | 187 | 3644 | heap Δ: +-868 MB |
+| 36 000 000 | 46845 | 620 | 1791 | 1674 | 243 | 4593 | heap Δ: +775 MB |
+| 38 000 000 | 49504 | 285 | 1895 | 1814 | 322 | 3985 | heap Δ: +100 MB |
+| 40 000 000 | 52199 | 310 | 2055 | 1908 | 163 | 4025 | heap Δ: +-371 MB |
+| 42 000 000 | 54953 | 670 | 2098 | 2075 | 206 | 4559 | heap Δ: +481 MB |
+| 44 000 000 | 58050 | 791 | 2338 | 2325 | 414 | 4689 | heap Δ: +104 MB |
+| 46 000 000 | 61375 | 566 | 2784 | 2457 | 698 | 4637 | heap Δ: +-385 MB |
+| 48 000 000 | 64530 | 661 | 2754 | 2602 | 293 | 5322 | heap Δ: +336 MB |
+| 50 000 000 | 69607 | 834 | 3608 | 3152 | 244 | 5655 | heap Δ: +599 MB |
+| 52 000 000 | 73137 | 543 | 2718 | 2596 | 241 | 7076 | heap Δ: +-73 MB |
+| 54 000 000 | 76198 | 866 | 2663 | 2626 | 399 | 7526 | heap Δ: +241 MB |
+| 56 000 000 | 79171 | 526 | 2908 | 2724 | 250 | 6740 | heap Δ: +917 MB |
+| 58 000 000 | 82197 | 670 | 2937 | 2840 | 554 | 7025 | heap Δ: +-796 MB |
+| 60 000 000 | 85241 | 824 | 7006 | 4738 | 746 | 6906 | heap Δ: +139 MB |
+| 62 000 000 | 88830 | 587 | 3259 | 3044 | 308 | 6394 | heap Δ: +-869 MB |
+| 64 000 000 | 92228 | 779 | 3605 | 3205 | 506 | 6544 | heap Δ: +-1296 MB |
+| 66 000 000 | 95378 | 1020 | 3232 | 3165 | 605 | 7021 | heap Δ: +-165 MB |
+| 68 000 000 | 98539 | 843 | 3387 | 3243 | 668 | 7245 | heap Δ: +-223 MB |
+| 70 000 000 | 101742 | 1165 | 3467 | 3421 | 799 | 7165 | heap Δ: +-222 MB |
+| 70 560 406 | 103395 | 1410 | 3491 | 3391 | 803 | 7918 | heap Δ: +350 MB |
 
 ---
 
 ## Résumé final
 
 - **Lignes chargées** : 70 560 406
-- **Heap utilisé**    : 7670 MB
+- **Heap utilisé**    : 8057 MB
 - **Heap max JVM**    : 10240 MB
 
 ### Résultats des requêtes (données complètes)
 
 | Requête | Description | Groupes | Temps |
 |---------|-------------|--------:|------:|
-| R1 | GROUP BY payment_type | 6 | 10462 ms |
-| R2 | GROUP BY passenger_count WHERE pc>0 AND dist>0 | 11 | 6473 ms |
-| R3 | GROUP BY DOLocationID WHERE tip>0 | 261 | 4666 ms |
-| R4 | GROUP BY payment_type SUM | 6 | 2422 ms |
+| R1 | GROUP BY payment_type | 6 | 1410 ms |
+| R2 | GROUP BY passenger_count WHERE pc>0 AND dist>0 | 11 | 3491 ms |
+| R3 | GROUP BY DOLocationID WHERE tip>0 | 261 | 3391 ms |
+| R4 | GROUP BY payment_type SUM | 6 | 803 ms |
 
 ---
 
 *Généré automatiquement par FastBase BenchmarkDemo*
-=======
-## Résultats par palier — avant optimisations P9/P12
-
-| Lignes | LOAD (ms) | R1 (ms) | R2 (ms) | R3 (ms) | R4 (ms) | Heap (MB) | Note |
-|-------:|----------:|--------:|--------:|--------:|--------:|----------:|------|
-| 1 000 000 | 1760 | 59 | 140 | 91 | 32 | 533 | heap Δ: +490 MB |
-| 2 000 000 | 1042 | 152 | 68 | 70 | 38 | 451 | heap Δ: +150 MB |
-| 4 000 000 | 2054 | 131 | 114 | 168 | 90 | 854 | heap Δ: +208 MB |
-| 6 000 000 | 2235 | 204 | 207 | 213 | 126 | 1032 | heap Δ: +152 MB |
-| 8 000 000 | 2379 | 284 | 265 | 263 | 178 | 1367 | heap Δ: +114 MB |
-| 10 000 000 | 2422 | 347 | 361 | 296 | 224 | 1704 | heap Δ: +30 MB |
-| 12 000 000 | 2670 | 453 | 440 | 471 | 251 | 2000 | heap Δ: +-416 MB |
-| 14 000 000 | 2850 | 511 | 523 | 556 | 345 | 2334 | heap Δ: +-168 MB |
-| 16 000 000 | 2618 | 608 | 619 | 602 | 397 | 2705 | heap Δ: +-218 MB |
-| 18 000 000 | 3283 | 743 | 662 | 685 | 484 | 2964 | heap Δ: +-373 MB |
-| 20 000 000 | 3005 | 818 | 799 | 766 | 503 | 3563 | heap Δ: +629 MB |
-| 22 000 000 | 3276 | 1075 | 1147 | 988 | 766 | 3594 | heap Δ: +33 MB |
-
----
-
-## Nouvelles optimisations implémentées (P9 / P12)
-
-### P9 — NumericCondition : WHERE sans boxing (QueryService)
-
-**Problème :** `SimpleCondition.matches()` appelait `table.getValue()` qui boxait chaque valeur
-numérique en `Integer`/`Float`/`Long` → création d'un objet par ligne comparée.
-Sur 22M lignes avec WHERE : 22M allocations → pression GC visible dans les temps.
-
-**Fix :** au moment du parsing WHERE, si la colonne est numérique, on crée une `NumericCondition`
-qui appelle `table.getNumericRaw()` → retourne un `double` primitif sans aucun boxing.
-
-```java
-// Avant (boxing sur chaque ligne) :
-Object cell = table.getValue(rowIdx, colIndex);  // crée Integer/Float
-if (isNum && cell instanceof Number n) { double v = n.doubleValue(); ... }
-
-// Après (zéro boxing) :
-double v = table.getNumericRaw(colIndex, rowIdx);  // double primitif direct
-```
-
-**Gain estimé :** −15 à −25% sur WHERE numérique à grand volume.
-
----
-
-### P12 — GROUP BY parallèle par CPU (QueryService)
-
-**Problème :** la boucle d'accumulation GROUP BY était entièrement séquentielle même sur 12 CPUs.
-
-**Fix :** quand pas de WHERE et volume > 500k lignes, partition les lignes en N segments (N = nb CPUs).
-Chaque thread accumule dans son propre `HashMap<Long, GroupAcc>`, puis merge final.
-Le merge est trivial car les GROUP BY typiques ont peu de valeurs distinctes (VendorID=2, payment_type=5).
-
-```
-22M lignes, 12 CPUs :
-  Avant  : 1 thread × 22M itérations     = ~988ms
-  Après  : 12 threads × 1.8M + merge     = ~120ms  (×8 gain)
-```
-
-**Gain estimé :** ×6 à ×10 sur GROUP BY sans WHERE (selon nb CPUs).
-
----
-
-### P11 — Lecture Parquet typée (DataLoaderService) — déjà présent
-
-`readParquetField()` utilise `group.getInteger()`, `group.getLong()`, `group.getDouble()`
-au lieu de `getValueToString()` + `parseValue()`. Aucune String créée pour les colonnes numériques.
-Sur 22M lignes × 18 colonnes numériques = 396M allocations String évitées.
-
----
-
-## Résultats après optimisations — à compléter après mesures
-
-| Lignes | LOAD (ms) | R1 SELECT (ms) | R2 WHERE (ms) | R3 GROUP BY (ms) | R4 (ms) |
-|-------:|----------:|---------------:|--------------:|-----------------:|--------:|
-| _à mesurer_ | | | | | |
->>>>>>> a74f545f4a85e1ea90271fadc3f06b63cfe39c79

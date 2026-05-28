@@ -291,6 +291,7 @@ public class BenchmarkDemo {
             benchLines.add("lignes,LOAD_ms,R1_ms,R2_ms,R3_ms,R4_ms,heap_mb");
 
             int  prevScale = 0;
+            long totalLoadMs = 0;
             long r1Ms = 0, r2Ms = 0, r3Ms = 0, r4Ms = 0;
             List<Map<String, Object>> r1 = Collections.emptyList();
             List<Map<String, Object>> r2 = Collections.emptyList();
@@ -304,6 +305,7 @@ public class BenchmarkDemo {
                 long t0         = System.nanoTime();
                 int  added      = loader.loadParquetData(tableName, DATA_PATH, prevScale, delta);
                 long loadMs     = (System.nanoTime() - t0) / 1_000_000;
+                totalLoadMs    += loadMs;
                 long heapAfter  = usedHeapMb();
 
                 int     actual = prevScale + added;
@@ -316,7 +318,7 @@ public class BenchmarkDemo {
                 tq = System.nanoTime(); r4 = query.execute(tableName, R4_COLS, null,     R4_GROUPBY, R4_ORDERBY, R4_DIR, null); r4Ms = (System.nanoTime()-tq)/1_000_000;
 
                 System.out.printf("  %,14d  %7d ms  %6d     %6d     %6d     %6d     %6d MB%s%n",
-                        actual, loadMs, r1Ms, r2Ms, r3Ms, r4Ms, heapAfter,
+                        actual, totalLoadMs, r1Ms, r2Ms, r3Ms, r4Ms, heapAfter,
                         eof ? "  ← FIN DU FICHIER" : "");
 
                 // Trace Markdown
@@ -324,10 +326,10 @@ public class BenchmarkDemo {
                         ? "⬅ fin du fichier"
                         : "heap Δ: +" + (heapAfter - heapBefore) + " MB";
                 trace.printf("| %,d | %d | %d | %d | %d | %d | %d | %s |%n",
-                        actual, loadMs, r1Ms, r2Ms, r3Ms, r4Ms, heapAfter, note);
+                        actual, totalLoadMs, r1Ms, r2Ms, r3Ms, r4Ms, heapAfter, note);
                 trace.flush();
 
-                benchLines.add(actual + "," + loadMs + "," + r1Ms + "," + r2Ms + "," + r3Ms + "," + r4Ms + "," + heapAfter);
+                benchLines.add(actual + "," + totalLoadMs + "," + r1Ms + "," + r2Ms + "," + r3Ms + "," + r4Ms + "," + heapAfter);
                 prevScale = actual;
                 if (eof) break;
             }
