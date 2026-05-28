@@ -115,9 +115,11 @@ public class BenchmarkDemo {
 
     // ── Paliers : 1M → 2M → 4M → +2M jusqu'à la fin ─────────────────────
     private static List<Integer> buildScales(long totalRows) {
-        List<Integer> s = new ArrayList<>(List.of(1_000_000, 2_000_000, 4_000_000));
-        int next = 6_000_000;
-        while (next < totalRows) { s.add(next); next += 2_000_000; }
+        List<Integer> s = new ArrayList<>();
+        s.add(4_000_000);
+        s.add(10_000_000);
+        int next = 20_000_000;
+        while (next < totalRows) { s.add(next); next += 10_000_000; }
         if (s.get(s.size() - 1) < totalRows) s.add((int) Math.min(totalRows, Integer.MAX_VALUE));
         return s;
     }

@@ -31,10 +31,6 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Chargement CSV et Parquet avec écriture directe dans le stockage colonnaire de Table.
@@ -152,16 +148,9 @@ public class DataLoaderService {
             // Mapping colonnes Parquet → colonnes Table (construit une fois depuis le schéma)
             int[] columnMapping = buildParquetColumnMappingFromSchema(parquetFields, columns);
 
-            // P13 : décodage parallèle par row group
-            // Le fichier est lu séquentiellement (I/O, 1 thread) mais chaque row group
-            // (~1M lignes) est décodé + écrit en parallèle (CPU-bound, N threads).
-            // Chaque worker a son propre RecordReader sur son propre PageReadStore → zéro contention.
-            int nThreads = Runtime.getRuntime().availableProcessors();
-            ExecutorService pool = Executors.newFixedThreadPool(nThreads);
-            List<Future<Integer>> futures = new ArrayList<>();
-
-            int  totalAllocated = 0;
+            int           totalAllocated = 0;
             PageReadStore pages;
+            MessageColumnIO cio = new ColumnIOFactory().getColumnIO(schema);
 
             while ((pages = fileReader.readNextRowGroup()) != null) {
                 if (maxRows > 0 && totalAllocated >= maxRows) break;
@@ -169,33 +158,15 @@ public class DataLoaderService {
                 int groupRows = (int) pages.getRowCount();
                 if (maxRows > 0) groupRows = Math.min(groupRows, maxRows - totalAllocated);
 
-                // Pré-alloue les lignes dans la table (synchronisé, ultra-rapide)
                 int startRow = table.allocateBatch(groupRows);
                 totalAllocated += groupRows;
 
-                // Capture finale pour le lambda
-                final PageReadStore finalPages   = pages;
-                final int           finalStart   = startRow;
-                final int           finalRows    = groupRows;
-                final int[]         finalMapping = columnMapping;
-
-                futures.add(pool.submit(() -> {
-                    // Chaque worker crée son propre ColumnIO + RecordReader (non thread-safe)
-                    MessageColumnIO     cio = new ColumnIOFactory().getColumnIO(schema);
-                    RecordReader<Group> rr  = cio.getRecordReader(finalPages, new GroupRecordConverter(schema));
-                    for (int i = 0; i < finalRows; i++) {
-                        Group g = rr.read();
-                        if (g == null) break;
-                        writeParquetRow(g, finalStart + i, finalMapping, columns, table, parquetFields);
-                    }
-                    return finalRows;
-                }));
-            }
-
-            pool.shutdown();
-            pool.awaitTermination(10, TimeUnit.MINUTES);
-            for (Future<Integer> f : futures) {
-                try { f.get(); } catch (Exception e) { throw new IOException("Erreur décodage Parquet parallèle", e); }
+                RecordReader<Group> rr = cio.getRecordReader(pages, new GroupRecordConverter(schema));
+                for (int i = 0; i < groupRows; i++) {
+                    Group g = rr.read();
+                    if (g == null) break;
+                    writeParquetRow(g, startRow + i, columnMapping, columns, table, parquetFields);
+                }
             }
 
             table.trimRowCount(totalAllocated);
@@ -218,6 +189,8 @@ public class DataLoaderService {
 
         try (ParquetFileReader fileReader = ParquetFileReader.open(localFile(filePath))) {
             MessageType schema = fileReader.getFooter().getFileMetaData().getSchema();
+
+            if (maxRows > 0) table.reserveCapacity(existingRows + maxRows);
 
             // Saute les row-groups entièrement compris dans skipRows (O(1) par groupe)
             long rowsSkipped = 0;
