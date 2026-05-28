@@ -190,8 +190,6 @@ public class DataLoaderService {
         try (ParquetFileReader fileReader = ParquetFileReader.open(localFile(filePath))) {
             MessageType schema = fileReader.getFooter().getFileMetaData().getSchema();
 
-            if (maxRows > 0) table.reserveCapacity(existingRows + maxRows);
-
             // Saute les row-groups entièrement compris dans skipRows (O(1) par groupe)
             long rowsSkipped = 0;
             for (org.apache.parquet.hadoop.metadata.BlockMetaData block

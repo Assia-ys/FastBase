@@ -2,10 +2,10 @@
 
 | Paramètre | Valeur |
 |-----------|--------|
-| Date      | `2026-05-28 17:04:18` |
+| Date      | `2026-05-28 17:17:29` |
 | Fichier   | `yellow_tripdata_combined.parquet` |
 | Lignes totales | 70 560 406 |
-| Heap max JVM   | 4 014 MB |
+| Heap max JVM   | 14 336 MB |
 | CPUs           | 12 |
 | Stockage       | `int[]` / `long[]` / `float[]` colonnaire |
 | Colonnes       | 19 (4×INTEGER, 2×LONG, 12×DOUBLE→float, 1×STRING) |
@@ -123,6 +123,33 @@ applyGroupBy(table, null, ...); // for (int i = 0; i < rowCount; i++)
 
 | Lignes | LOAD (ms) | R1 (ms) | R2 (ms) | R3 (ms) | R4 (ms) | Heap (MB) | Note |
 |-------:|----------:|--------:|--------:|--------:|--------:|----------:|------|
-| 4 000 000 | 4469 | 161 | 289 | 246 | 35 | 725 | heap Δ: +682 MB |
-| 10 000 000 | 11567 | 102 | 487 | 425 | 45 | 1704 | heap Δ: +592 MB |
-| 20 000 000 | 28593 | 266 | 1231 | 1075 | 110 | 3300 | heap Δ: +875 MB |
+| 4 000 000 | 4100 | 245 | 302 | 273 | 56 | 732 | heap Δ: +681 MB |
+| 10 000 000 | 9837 | 97 | 571 | 372 | 52 | 1590 | heap Δ: +439 MB |
+| 20 000 000 | 19647 | 124 | 714 | 734 | 167 | 2452 | heap Δ: +1074 MB |
+| 30 000 000 | 29097 | 569 | 1082 | 1110 | 207 | 3477 | heap Δ: +1254 MB |
+| 40 000 000 | 39063 | 435 | 1581 | 1719 | 352 | 4396 | heap Δ: +1216 MB |
+| 50 000 000 | 54932 | 619 | 2524 | 2411 | 580 | 6064 | heap Δ: +1613 MB |
+| 60 000 000 | 65926 | 937 | 2436 | 2437 | 449 | 6039 | heap Δ: +485 MB |
+| 70 000 000 | 76613 | 1046 | 4032 | 4457 | 710 | 7056 | heap Δ: +626 MB |
+| 70 560 406 | 78867 | 973 | 3471 | 3073 | 483 | 7324 | heap Δ: +-773 MB |
+
+---
+
+## Résumé final
+
+- **Lignes chargées** : 70 560 406
+- **Heap utilisé**    : 8180 MB
+- **Heap max JVM**    : 14336 MB
+
+### Résultats des requêtes (données complètes)
+
+| Requête | Description | Groupes | Temps |
+|---------|-------------|--------:|------:|
+| R1 | GROUP BY payment_type | 6 | 973 ms |
+| R2 | GROUP BY passenger_count WHERE pc>0 AND dist>0 | 11 | 3471 ms |
+| R3 | GROUP BY DOLocationID WHERE tip>0 | 261 | 3073 ms |
+| R4 | GROUP BY payment_type SUM | 6 | 483 ms |
+
+---
+
+*Généré automatiquement par FastBase BenchmarkDemo*
