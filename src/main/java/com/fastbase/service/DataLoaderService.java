@@ -158,6 +158,7 @@ public class DataLoaderService {
             int[] longSlots = new int[nCols]; int[] strSlots  = new int[nCols];
             boolean[] isBoolSlot = new boolean[nCols];
             boolean[] isDoubleParquet = new boolean[nCols];
+            PrimitiveTypeName[] colPtn = new PrimitiveTypeName[nCols];
             for (int pi = 0; pi < nCols; pi++) {
                 int tc = columnMapping[pi];
                 fltSlots[pi]  = tc >= 0 ? table.getFltSlot(tc)  : -1;
@@ -167,6 +168,7 @@ public class DataLoaderService {
                 if (tc >= 0 && columns.get(tc).getType() == ColumnType.BOOLEAN) isBoolSlot[pi] = true;
                 PrimitiveTypeName ptn = colDescs.get(pi).getPrimitiveType().getPrimitiveTypeName();
                 isDoubleParquet[pi] = (ptn == PrimitiveTypeName.DOUBLE);
+                colPtn[pi] = ptn;
             }
 
             int  totalAllocated = 0;
@@ -194,11 +196,11 @@ public class DataLoaderService {
                     int flt = fltSlots[pi], ini = intSlots[pi], lng = longSlots[pi], str = strSlots[pi];
 
                     if (flt >= 0) {
-                        boolean isD = isDoubleParquet[pi];
-                        for (int r = 0; r < groupRows; r++) {
-                            if (cr.getCurrentDefinitionLevel() >= maxDef)
-                                table.writeFloat(flt, startRow + r, isD ? (float) cr.getDouble() : cr.getFloat());
-                            cr.consume();
+                        switch (colPtn[pi]) {
+                            case DOUBLE -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeFloat(flt, startRow + r, (float) cr.getDouble()); cr.consume(); } }
+                            case INT32  -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeFloat(flt, startRow + r, (float) cr.getInteger()); cr.consume(); } }
+                            case INT64  -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeFloat(flt, startRow + r, (float) cr.getLong()); cr.consume(); } }
+                            default     -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeFloat(flt, startRow + r, cr.getFloat()); cr.consume(); } }
                         }
                     } else if (ini >= 0) {
                         if (isBoolSlot[pi]) {
@@ -208,17 +210,18 @@ public class DataLoaderService {
                                 cr.consume();
                             }
                         } else {
-                            for (int r = 0; r < groupRows; r++) {
-                                if (cr.getCurrentDefinitionLevel() >= maxDef)
-                                    table.writeInt(ini, startRow + r, cr.getInteger());
-                                cr.consume();
+                            switch (colPtn[pi]) {
+                                case INT32  -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeInt(ini, startRow + r, cr.getInteger()); cr.consume(); } }
+                                case INT64  -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeInt(ini, startRow + r, (int) cr.getLong()); cr.consume(); } }
+                                case DOUBLE -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeInt(ini, startRow + r, (int) cr.getDouble()); cr.consume(); } }
+                                default     -> { for (int r = 0; r < groupRows; r++) cr.consume(); }
                             }
                         }
                     } else if (lng >= 0) {
-                        for (int r = 0; r < groupRows; r++) {
-                            if (cr.getCurrentDefinitionLevel() >= maxDef)
-                                table.writeLong(lng, startRow + r, cr.getLong());
-                            cr.consume();
+                        switch (colPtn[pi]) {
+                            case INT64  -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeLong(lng, startRow + r, cr.getLong()); cr.consume(); } }
+                            case INT32  -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeLong(lng, startRow + r, (long) cr.getInteger()); cr.consume(); } }
+                            default     -> { for (int r = 0; r < groupRows; r++) cr.consume(); }
                         }
                     } else if (str >= 0) {
                         for (int r = 0; r < groupRows; r++) {

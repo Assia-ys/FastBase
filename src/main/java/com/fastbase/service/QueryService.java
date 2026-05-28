@@ -182,7 +182,6 @@ public class QueryService {
                 throw new InvalidQueryException("Colonne GROUP BY introuvable : " + groupByCols.get(i));
         }
 
-        record AggInfo(String col, String type, int colIdx) {}
         List<AggInfo> aggs = new ArrayList<>();
         if (selectCols != null) {
             for (String col : selectCols) {
@@ -350,7 +349,7 @@ public class QueryService {
         }
     }
 
-    // record AggInfo déclarée en local dans applyGroupBy → pas besoin ici
+    private record AggInfo(String col, String type, int colIdx) {}
 
     private static class GroupAcc {
         final Object[] groupVals; long count = 0;
@@ -374,7 +373,7 @@ public class QueryService {
                 int c = compareValues(table.getValue(a, idx), table.getValue(b, idx));
                 return desc ? -c : c;
             });
-            return IntStream.of(Arrays.stream(boxed).mapToInt(Integer::intValue).toArray()).toArray();
+            return Arrays.stream(boxed).mapToInt(Integer::intValue).toArray();
         }
         Integer[] boxed = IntStream.of(rows).boxed().toArray(Integer[]::new);
         Arrays.sort(boxed, (a, b) -> {
