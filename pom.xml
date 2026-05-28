@@ -102,9 +102,12 @@
 				<configuration>
 					<mainClass>com.fastbase.demo.BenchmarkDemo</mainClass>
 					<jvmArgs>
-						<jvmArg>-Xmx20g</jvmArg>
-						<jvmArg>-Xms4g</jvmArg>
+						<jvmArg>-Xmx10g</jvmArg>
+						<jvmArg>-Xms1g</jvmArg>
 						<jvmArg>-XX:+UseG1GC</jvmArg>
+						<jvmArg>-XX:G1HeapRegionSize=16m</jvmArg>
+						<jvmArg>-XX:MaxGCPauseMillis=500</jvmArg>
+						<jvmArg>-XX:+UseCompressedOops</jvmArg>
 					</jvmArgs>
 				</configuration>
 			</plugin>

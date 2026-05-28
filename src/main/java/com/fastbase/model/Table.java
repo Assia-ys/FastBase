@@ -5,42 +5,46 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import java.util.*;
 
 /**
- * Stockage colonnaire en chunks.
+ * Stockage colonnaire typé en chunks.
  *
- * Chaque colonne numérique est découpée en blocs de CHUNK_SIZE doubles (= 8 MB/bloc).
- * On n'alloue jamais plus de 8 MB à la fois → plus d'OOM sur 50M lignes même avec 12 GB heap.
+ * Type Java par ColumnType :
+ *   INTEGER / BOOLEAN → int[][][]   (4 octets)
+ *   LONG              → long[][][]  (8 octets, précis sur 64 bits)
+ *   DOUBLE            → float[][][] (4 octets, ~7 chiffres significatifs)
+ *   STRING            → String[][][] (intern() pour les valeurs répétées)
  *
- * Architecture (17 colonnes NYC Taxi, 50M lignes) :
- *   - 17 colonnes × 50 chunks × 1M doubles = 6,8 GB
- *   - Allocation : 850 blocs de 8 MB (vs 17 allocations de 400 MB → OOM assuré)
- *   - Accès  : numericData[colSlot][rowIdx >> BITS][rowIdx & MASK]  (2 accès tableau)
- *   - GC    : peut collecter des blocs individuels (pas de 400 MB humongoing objects)
+ * Empreinte mémoire NYC Taxi 19 cols / 50M lignes :
+ *   4 × INTEGER × 4 =  800 MB
+ *   2 × LONG    × 8 =  800 MB
+ *  12 × DOUBLE  × 4 = 2 400 MB
+ *   1 × STRING  × 8 =  400 MB
+ *  Total ≈ 4,4 GB  (vs 7,6 GB avec double pour tout)
  */
 public class Table {
 
-    // 2^18 = 262 144 lignes par chunk → 2 MB par colonne numérique.
-    // 2 MB < seuil humongous G1GC (4 MB pour heap 14 GB) → collecté normalement, pas en Full GC.
-    private static final int CHUNK_BITS = 18;
+    private static final int CHUNK_BITS = 18;            // 2^18 = 262 144 lignes/chunk
     private static final int CHUNK_SIZE = 1 << CHUNK_BITS;
     private static final int CHUNK_MASK = CHUNK_SIZE - 1;
 
     private String       name;
     private List<Column> columns;
 
-    // Schéma : mappings colonne → slot dans les arrays colonnaires
-    private int[]        colNumIdx;  // colonne i → slot dans numericData, -1 si texte
-    private int[]        colStrIdx;  // colonne i → slot dans stringData, -1 si numérique
-    private int          numCount;
-    private int          strCount;
+    // Schéma — un seul slot actif parmi les quatre pour chaque colonne i
+    private int[]        colIntIdx;   // col i → slot intData,    -1 sinon
+    private int[]        colLongIdx;  // col i → slot longData,   -1 sinon
+    private int[]        colFltIdx;   // col i → slot floatData,  -1 sinon
+    private int[]        colStrIdx;   // col i → slot stringData, -1 sinon
     private ColumnType[] colTypes;
+    private int          intCount, longCount, fltCount, strCount;
 
-    // numericData[colSlot][chunkIdx][posInChunk]
-    // stringData [colSlot][chunkIdx][posInChunk]
-    private double[][][]  numericData;
-    private String[][][]  stringData;
+    // Stockage [colSlot][chunkIdx][posInChunk]
+    private int[][][]    intData;
+    private long[][][]   longData;
+    private float[][][]  floatData;
+    private String[][][] stringData;
 
     private int rowCount  = 0;
-    private int numChunks = 0;  // chunks déjà alloués
+    private int numChunks = 0;
 
     private final Map<String, Integer> columnIndex = new HashMap<>();
 
@@ -59,52 +63,62 @@ public class Table {
 
     // ── Schéma ────────────────────────────────────────────────────
 
-    private static boolean isNumeric(ColumnType t) {
-        return t == ColumnType.INTEGER || t == ColumnType.LONG
-            || t == ColumnType.DOUBLE  || t == ColumnType.BOOLEAN;
-    }
-
     private void rebuildIndex() {
         columnIndex.clear();
         int n = columns.size();
-        colNumIdx = new int[n]; colStrIdx = new int[n]; colTypes = new ColumnType[n];
-        int nc = 0, sc = 0;
+        colIntIdx  = new int[n]; Arrays.fill(colIntIdx,  -1);
+        colLongIdx = new int[n]; Arrays.fill(colLongIdx, -1);
+        colFltIdx  = new int[n]; Arrays.fill(colFltIdx,  -1);
+        colStrIdx  = new int[n]; Arrays.fill(colStrIdx,  -1);
+        colTypes   = new ColumnType[n];
+        int ic = 0, lc = 0, fc = 0, sc = 0;
         for (int i = 0; i < n; i++) {
             Column col = columns.get(i);
             columnIndex.put(col.getName(), i);
             colTypes[i] = col.getType();
-            if (isNumeric(col.getType())) { colNumIdx[i] = nc++; colStrIdx[i] = -1; }
-            else                          { colNumIdx[i] = -1;   colStrIdx[i] = sc++; }
+            switch (col.getType()) {
+                case INTEGER, BOOLEAN -> colIntIdx[i]  = ic++;
+                case LONG             -> colLongIdx[i] = lc++;
+                case DOUBLE           -> colFltIdx[i]  = fc++;
+                default               -> colStrIdx[i]  = sc++;
+            }
         }
-        numCount = nc; strCount = sc;
-        numericData = new double[numCount][][];
-        stringData  = new String[strCount][][];
-        for (int i = 0; i < numCount; i++) numericData[i] = new double[0][];
-        for (int i = 0; i < strCount;  i++) stringData[i]  = new String[0][];
+        intCount  = ic; longCount = lc; fltCount = fc; strCount = sc;
+        intData    = new int[intCount][][];
+        longData   = new long[longCount][][];
+        floatData  = new float[fltCount][][];
+        stringData = new String[strCount][][];
+        for (int i = 0; i < intCount;  i++) intData[i]    = new int[0][];
+        for (int i = 0; i < longCount; i++) longData[i]   = new long[0][];
+        for (int i = 0; i < fltCount;  i++) floatData[i]  = new float[0][];
+        for (int i = 0; i < strCount;  i++) stringData[i] = new String[0][];
         numChunks = 0; rowCount = 0;
     }
 
     // ── Capacité par chunks ───────────────────────────────────────
 
-    /**
-     * Alloue des chunks supplémentaires jusqu'à couvrir {@code needed} lignes.
-     * Chaque chunk = 8 MB (CHUNK_SIZE doubles) → jamais d'objet "humongous" en G1GC.
-     */
     public synchronized void ensureCapacity(int needed) {
         int currentCap = numChunks * CHUNK_SIZE;
         while (currentCap < needed) {
             int ci = numChunks;
-            // Agrandit le tableau de chunks pour chaque colonne
-            for (int s = 0; s < numCount; s++) {
-                double[][] old = numericData[s];
-                double[][] neo = Arrays.copyOf(old, ci + 1);
-                neo[ci] = new double[CHUNK_SIZE]; // 8 MB, initialisé à 0.0 (pas de NaN)
-                numericData[s] = neo;
+            for (int s = 0; s < intCount; s++) {
+                int[][] neo = Arrays.copyOf(intData[s], ci + 1);
+                neo[ci] = new int[CHUNK_SIZE];
+                intData[s] = neo;
+            }
+            for (int s = 0; s < longCount; s++) {
+                long[][] neo = Arrays.copyOf(longData[s], ci + 1);
+                neo[ci] = new long[CHUNK_SIZE];
+                longData[s] = neo;
+            }
+            for (int s = 0; s < fltCount; s++) {
+                float[][] neo = Arrays.copyOf(floatData[s], ci + 1);
+                neo[ci] = new float[CHUNK_SIZE];
+                floatData[s] = neo;
             }
             for (int s = 0; s < strCount; s++) {
-                String[][] old = stringData[s];
-                String[][] neo = Arrays.copyOf(old, ci + 1);
-                neo[ci] = new String[CHUNK_SIZE]; // 4 MB (refs null)
+                String[][] neo = Arrays.copyOf(stringData[s], ci + 1);
+                neo[ci] = new String[CHUNK_SIZE];
                 stringData[s] = neo;
             }
             numChunks++;
@@ -112,27 +126,33 @@ public class Table {
         }
     }
 
-    /** Alias pour la compatibilité avec le code existant. */
     public void reserveCapacity(int cap) { ensureCapacity(cap); }
 
     // ── Écriture directe (DataLoaderService) ─────────────────────
 
-    /** Écrit une valeur dans le bon chunk, sans créer d'objet Row. */
     public void setColumnValue(int rowIdx, int colIdx, Object value) {
-        int ni = colNumIdx[colIdx];
-        if (ni >= 0) {
-            numericData[ni][rowIdx >> CHUNK_BITS][rowIdx & CHUNK_MASK] =
-                (value == null) ? 0.0 : ((Number) value).doubleValue();
+        int chunk = rowIdx >> CHUNK_BITS, pos = rowIdx & CHUNK_MASK;
+        int ii = colIntIdx[colIdx];
+        if (ii >= 0) {
+            intData[ii][chunk][pos] = value == null ? 0 : ((Number) value).intValue();
+            return;
+        }
+        int li = colLongIdx[colIdx];
+        if (li >= 0) {
+            longData[li][chunk][pos] = value == null ? 0L : ((Number) value).longValue();
+            return;
+        }
+        int fi = colFltIdx[colIdx];
+        if (fi >= 0) {
+            floatData[fi][chunk][pos] = value == null ? 0f : ((Number) value).floatValue();
             return;
         }
         int si = colStrIdx[colIdx];
         if (si >= 0)
-            stringData[si][rowIdx >> CHUNK_BITS][rowIdx & CHUNK_MASK] =
-                (value instanceof String s) ? s.intern()
-                : (value != null ? value.toString() : null);
+            stringData[si][chunk][pos] = value instanceof String s ? s.intern()
+                : value != null ? value.toString() : null;
     }
 
-    /** Alloue un bloc de {@code count} lignes et retourne l'index de départ. */
     public synchronized int allocateBatch(int count) {
         ensureCapacity(rowCount + count);
         int start = rowCount;
@@ -140,46 +160,56 @@ public class Table {
         return start;
     }
 
-    /** Corrige rowCount après un chargement partiel (dernier batch non complètement rempli). */
     public synchronized void trimRowCount(int actual) {
         if (actual >= 0 && actual < rowCount) rowCount = actual;
     }
 
-    // ── Rétro-compatibilité (tests avec Row legacy) ───────────────
-    /**
-     * Insère un batch de Row legacy (BenchmarkServiceTest, etc.).
-     * Les valeurs sont copiées dans le stockage colonnaire puis les Row sont jetés.
-     */
+    // ── Rétro-compatibilité tests (Row legacy) ────────────────────
+
     public void addRows(List<Row> batch) {
         if (batch.isEmpty()) return;
         int start = allocateBatch(batch.size());
         for (int j = 0; j < batch.size(); j++) {
             Row row = batch.get(j);
             int ri = start + j;
-            for (int ci = 0; ci < colNumIdx.length; ci++)
+            for (int ci = 0; ci < colIntIdx.length; ci++)
                 setColumnValue(ri, ci, row.getValue(ci));
         }
     }
 
-    /** Rétro-compatibilité : crée une Row legacy (anciens tests). */
     public Row createRow() { return new Row(columns.size()); }
 
     // ── Lecture (QueryService) ────────────────────────────────────
 
-    /** Retourne la valeur à (rowIdx, colIdx) avec le bon type Java. */
     public Object getValue(int rowIdx, int colIdx) {
-        int ni = colNumIdx[colIdx];
-        if (ni >= 0) {
-            double v = numericData[ni][rowIdx >> CHUNK_BITS][rowIdx & CHUNK_MASK];
-            return switch (colTypes[colIdx]) {
-                case INTEGER -> (int) v;
-                case LONG    -> (long) v;
-                case BOOLEAN -> v != 0.0;
-                default      -> v;
-            };
-        }
+        int chunk = rowIdx >> CHUNK_BITS, pos = rowIdx & CHUNK_MASK;
+        int ii = colIntIdx[colIdx];
+        if (ii >= 0) return colTypes[colIdx] == ColumnType.BOOLEAN
+                ? intData[ii][chunk][pos] != 0
+                : intData[ii][chunk][pos];
+        int li = colLongIdx[colIdx];
+        if (li >= 0) return longData[li][chunk][pos];
+        int fi = colFltIdx[colIdx];
+        if (fi >= 0) return (double) floatData[fi][chunk][pos];
         int si = colStrIdx[colIdx];
-        return si >= 0 ? stringData[si][rowIdx >> CHUNK_BITS][rowIdx & CHUNK_MASK] : null;
+        return si >= 0 ? stringData[si][chunk][pos] : null;
+    }
+
+    /** Valeur numérique brute sans boxing — utilisé par GROUP BY pour éviter Integer/Long/Double. */
+    public double getNumericRaw(int colIdx, int rowIdx) {
+        int chunk = rowIdx >> CHUNK_BITS, pos = rowIdx & CHUNK_MASK;
+        int ii = colIntIdx[colIdx];
+        if (ii >= 0) return intData[ii][chunk][pos];
+        int li = colLongIdx[colIdx];
+        if (li >= 0) return longData[li][chunk][pos];
+        int fi = colFltIdx[colIdx];
+        if (fi >= 0) return floatData[fi][chunk][pos];
+        return 0.0;
+    }
+
+    public boolean isNumericColumn(int colIdx) {
+        return colIdx >= 0
+            && (colIntIdx[colIdx] >= 0 || colLongIdx[colIdx] >= 0 || colFltIdx[colIdx] >= 0);
     }
 
     // ── Getters / Setters ─────────────────────────────────────────
@@ -204,19 +234,6 @@ public class Table {
         return idx >= 0 ? columns.get(idx) : null;
     }
 
-    /**
-     * Accès direct à la valeur numérique brute, sans boxing.
-     * Utilisé par QueryService pour GROUP BY sans créer de Long/Double/String.
-     */
-    public double getNumericRaw(int colIdx, int rowIdx) {
-        int ni = colNumIdx[colIdx];
-        return ni >= 0 ? numericData[ni][rowIdx >> CHUNK_BITS][rowIdx & CHUNK_MASK] : 0.0;
-    }
-
-    /** Retourne true si la colonne colIdx est numérique (stockée en double[]). */
-    public boolean isNumericColumn(int colIdx) { return colIdx >= 0 && colNumIdx[colIdx] >= 0; }
-
-    /** @deprecated Stockage colonnaire : utiliser getValue(rowIdx, colIdx). */
     @JsonIgnore
     public List<Row> getRows() { return Collections.emptyList(); }
 

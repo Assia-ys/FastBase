@@ -16,6 +16,7 @@ import org.apache.parquet.io.MessageColumnIO;
 import org.apache.parquet.io.RecordReader;
 import org.apache.parquet.io.SeekableInputStream;
 import org.apache.parquet.schema.MessageType;
+import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
 import org.apache.parquet.schema.Type;
 import java.nio.file.Paths;
 import org.springframework.stereotype.Service;
@@ -143,9 +144,10 @@ public class DataLoaderService {
             int cap = maxRows > 0 ? maxRows : (int) Math.min(totalInFile, 60_000_000);
             table.reserveCapacity(cap);
 
-            MessageColumnIO columnIO    = new ColumnIOFactory().getColumnIO(schema);
+            MessageColumnIO columnIO      = new ColumnIOFactory().getColumnIO(schema);
+            List<Type>      parquetFields = schema.getFields();
             int[]           columnMapping = null;
-            int             totalRows   = 0;
+            int             totalRows     = 0;
 
             PageReadStore pages;
             outer:
@@ -172,7 +174,7 @@ public class DataLoaderService {
                         batchStart = table.allocateBatch(allocCount);
                     }
 
-                    writeParquetRow(group, batchStart + batchFilled, columnMapping, columns, table);
+                    writeParquetRow(group, batchStart + batchFilled, columnMapping, columns, table, parquetFields);
                     batchFilled++;
 
                     if (batchFilled >= BATCH_SIZE) {
@@ -215,10 +217,11 @@ public class DataLoaderService {
             }
             long inGroupSkip = skipRows - rowsSkipped;
 
-            MessageColumnIO columnIO    = new ColumnIOFactory().getColumnIO(schema);
-            int[]           colMapping  = null;
-            int             totalRows   = 0;
-            boolean         firstGroup  = true;
+            MessageColumnIO columnIO      = new ColumnIOFactory().getColumnIO(schema);
+            List<Type>      parquetFields = schema.getFields();
+            int[]           colMapping    = null;
+            int             totalRows     = 0;
+            boolean         firstGroup    = true;
 
             PageReadStore pages;
             outer:
@@ -228,7 +231,7 @@ public class DataLoaderService {
                 long rowStart   = firstGroup ? inGroupSkip : 0;
                 firstGroup = false;
 
-                for (long j = 0; j < rowStart; j++) rr.read(); // lignes à ignorer dans le groupe partiel
+                for (long j = 0; j < rowStart; j++) rr.read();
 
                 int batchStart = 0, batchFilled = 0;
                 for (long i = rowStart; i < groupSize; i++) {
@@ -242,7 +245,7 @@ public class DataLoaderService {
                                 ? Math.min(BATCH_SIZE, maxRows - totalRows) : BATCH_SIZE;
                         batchStart = table.allocateBatch(allocCount);
                     }
-                    writeParquetRow(group, batchStart + batchFilled, colMapping, columns, table);
+                    writeParquetRow(group, batchStart + batchFilled, colMapping, columns, table, parquetFields);
                     batchFilled++;
                     if (batchFilled >= BATCH_SIZE) { totalRows += batchFilled; batchFilled = 0; }
                 }
@@ -402,16 +405,48 @@ public class DataLoaderService {
     }
 
     /**
-     * Parse un enregistrement Parquet et écrit directement dans les arrays colonnaires.
-     * Aucun objet Row créé.
+     * Écrit un enregistrement Parquet directement dans les arrays colonnaires.
+     * Utilise les getters natifs (getInteger, getLong, getFloat…) pour éviter
+     * de créer une String par champ — 0 allocation String pour les colonnes numériques.
      */
     private void writeParquetRow(Group group, int rowIdx, int[] columnMapping,
-                                 List<Column> columns, Table table) {
-        for (int parquetIdx = 0; parquetIdx < columnMapping.length; parquetIdx++) {
-            int colIdx = columnMapping[parquetIdx];
-            if (colIdx < 0 || group.getFieldRepetitionCount(parquetIdx) == 0) continue;
-            String raw = group.getValueToString(parquetIdx, 0);
-            table.setColumnValue(rowIdx, colIdx, parseValue(raw, columns.get(colIdx).getType()));
+                                 List<Column> columns, Table table,
+                                 List<Type> parquetFields) {
+        for (int pi = 0; pi < columnMapping.length; pi++) {
+            int colIdx = columnMapping[pi];
+            if (colIdx < 0 || group.getFieldRepetitionCount(pi) == 0) continue;
+            table.setColumnValue(rowIdx, colIdx,
+                readParquetField(group, pi, parquetFields.get(pi), columns.get(colIdx).getType()));
+        }
+    }
+
+    private Object readParquetField(Group group, int idx, Type field, ColumnType target) {
+        if (!field.isPrimitive()) {
+            return parseValue(group.getValueToString(idx, 0), target);
+        }
+        PrimitiveTypeName ptn = field.asPrimitiveType().getPrimitiveTypeName();
+        try {
+            return switch (ptn) {
+                case INT32   -> group.getInteger(idx, 0);
+                case INT64   -> group.getLong(idx, 0);
+                case FLOAT   -> group.getFloat(idx, 0);
+                case DOUBLE  -> group.getDouble(idx, 0);
+                case BOOLEAN -> group.getBoolean(idx, 0) ? 1 : 0;
+                // INT96 / BINARY → chaîne, puis parsing selon le type cible
+                default -> {
+                    String s = group.getValueToString(idx, 0);
+                    yield target == ColumnType.LONG ? parseLongValue(s) : s;
+                }
+            };
+        } catch (Exception e) { return null; }
+    }
+
+    private static Long parseLongValue(String v) {
+        if (v == null || v.isBlank()) return null;
+        try { return Long.parseLong(v.trim()); }
+        catch (NumberFormatException e) {
+            try { return LocalDateTime.parse(v.trim(), DT_FORMATTER).toEpochSecond(ZoneOffset.UTC); }
+            catch (Exception e2) { return null; }
         }
     }
 
