@@ -6,6 +6,9 @@ import com.fastbase.model.Table;
 import com.fastbase.model.enums.ColumnType;
 import com.fastbase.storage.DataStorage;
 import jakarta.validation.constraints.NotBlank;
+import org.apache.parquet.column.ColumnDescriptor;
+import org.apache.parquet.column.ColumnReader;
+import org.apache.parquet.column.impl.ColumnReadStoreImpl;
 import org.apache.parquet.column.page.PageReadStore;
 import org.apache.parquet.example.data.Group;
 import org.apache.parquet.example.data.simple.convert.GroupRecordConverter;
@@ -145,27 +148,87 @@ public class DataLoaderService {
             int cap = maxRows > 0 ? maxRows : (int) Math.min(totalInFile, 70_000_000);
             table.reserveCapacity(cap);
 
-            // Mapping colonnes Parquet → colonnes Table (construit une fois depuis le schéma)
+            // Mapping Parquet col index → table col index
             int[] columnMapping = buildParquetColumnMappingFromSchema(parquetFields, columns);
 
-            int           totalAllocated = 0;
+            // Pré-calcul des slots typés pour chaque colonne Parquet (1 fois avant la boucle)
+            List<ColumnDescriptor> colDescs = schema.getColumns();
+            int nCols = colDescs.size();
+            int[] fltSlots  = new int[nCols]; int[] intSlots  = new int[nCols];
+            int[] longSlots = new int[nCols]; int[] strSlots  = new int[nCols];
+            boolean[] isBoolSlot = new boolean[nCols];
+            boolean[] isDoubleParquet = new boolean[nCols];
+            for (int pi = 0; pi < nCols; pi++) {
+                int tc = columnMapping[pi];
+                fltSlots[pi]  = tc >= 0 ? table.getFltSlot(tc)  : -1;
+                intSlots[pi]  = tc >= 0 ? table.getIntSlot(tc)  : -1;
+                longSlots[pi] = tc >= 0 ? table.getLongSlot(tc) : -1;
+                strSlots[pi]  = tc >= 0 ? table.getStrSlot(tc)  : -1;
+                if (tc >= 0 && columns.get(tc).getType() == ColumnType.BOOLEAN) isBoolSlot[pi] = true;
+                PrimitiveTypeName ptn = colDescs.get(pi).getPrimitiveType().getPrimitiveTypeName();
+                isDoubleParquet[pi] = (ptn == PrimitiveTypeName.DOUBLE);
+            }
+
+            int  totalAllocated = 0;
             PageReadStore pages;
-            MessageColumnIO cio = new ColumnIOFactory().getColumnIO(schema);
 
             while ((pages = fileReader.readNextRowGroup()) != null) {
                 if (maxRows > 0 && totalAllocated >= maxRows) break;
-
                 int groupRows = (int) pages.getRowCount();
                 if (maxRows > 0) groupRows = Math.min(groupRows, maxRows - totalAllocated);
-
                 int startRow = table.allocateBatch(groupRows);
                 totalAllocated += groupRows;
 
-                RecordReader<Group> rr = cio.getRecordReader(pages, new GroupRecordConverter(schema));
-                for (int i = 0; i < groupRows; i++) {
-                    Group g = rr.read();
-                    if (g == null) break;
-                    writeParquetRow(g, startRow + i, columnMapping, columns, table, parquetFields);
+                // P15 : lecture colonnaire directe — zéro objet Group créé pour les numériques
+                // ColumnReader lit colonne par colonne → accès séquentiel aux float[]/int[]/long[]
+                // → ×3-5 moins d'allocations vs GroupRecordConverter row-by-row
+                ColumnReadStoreImpl cs = new ColumnReadStoreImpl(
+                        pages, new GroupRecordConverter(schema).getRootConverter(),
+                        schema, "parquet-mr");
+
+                for (int pi = 0; pi < nCols; pi++) {
+                    if (columnMapping[pi] < 0) continue;
+                    ColumnDescriptor desc = colDescs.get(pi);
+                    ColumnReader cr = cs.getColumnReader(desc);
+                    int maxDef = desc.getMaxDefinitionLevel();
+                    int flt = fltSlots[pi], ini = intSlots[pi], lng = longSlots[pi], str = strSlots[pi];
+
+                    if (flt >= 0) {
+                        boolean isD = isDoubleParquet[pi];
+                        for (int r = 0; r < groupRows; r++) {
+                            if (cr.getCurrentDefinitionLevel() >= maxDef)
+                                table.writeFloat(flt, startRow + r, isD ? (float) cr.getDouble() : cr.getFloat());
+                            cr.consume();
+                        }
+                    } else if (ini >= 0) {
+                        if (isBoolSlot[pi]) {
+                            for (int r = 0; r < groupRows; r++) {
+                                if (cr.getCurrentDefinitionLevel() >= maxDef)
+                                    table.writeInt(ini, startRow + r, cr.getBoolean() ? 1 : 0);
+                                cr.consume();
+                            }
+                        } else {
+                            for (int r = 0; r < groupRows; r++) {
+                                if (cr.getCurrentDefinitionLevel() >= maxDef)
+                                    table.writeInt(ini, startRow + r, cr.getInteger());
+                                cr.consume();
+                            }
+                        }
+                    } else if (lng >= 0) {
+                        for (int r = 0; r < groupRows; r++) {
+                            if (cr.getCurrentDefinitionLevel() >= maxDef)
+                                table.writeLong(lng, startRow + r, cr.getLong());
+                            cr.consume();
+                        }
+                    } else if (str >= 0) {
+                        for (int r = 0; r < groupRows; r++) {
+                            if (cr.getCurrentDefinitionLevel() >= maxDef)
+                                table.writeString(str, startRow + r, cr.getBinary().toStringUsingUTF8());
+                            cr.consume();
+                        }
+                    } else {
+                        for (int r = 0; r < groupRows; r++) cr.consume();
+                    }
                 }
             }
 

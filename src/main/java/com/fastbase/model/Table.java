@@ -212,6 +212,27 @@ public class Table {
             && (colIntIdx[colIdx] >= 0 || colLongIdx[colIdx] >= 0 || colFltIdx[colIdx] >= 0);
     }
 
+    // ── Accès direct aux slots + écriture typée (DataLoaderService optimisé) ──────────
+    // Évite le dispatch de setColumnValue() dans la boucle chaude de chargement Parquet.
+
+    public int getFltSlot(int colIdx)  { return colIdx >= 0 && colIdx < colFltIdx.length  ? colFltIdx[colIdx]  : -1; }
+    public int getIntSlot(int colIdx)  { return colIdx >= 0 && colIdx < colIntIdx.length  ? colIntIdx[colIdx]  : -1; }
+    public int getLongSlot(int colIdx) { return colIdx >= 0 && colIdx < colLongIdx.length ? colLongIdx[colIdx] : -1; }
+    public int getStrSlot(int colIdx)  { return colIdx >= 0 && colIdx < colStrIdx.length  ? colStrIdx[colIdx]  : -1; }
+
+    public void writeFloat(int slot, int rowIdx, float v) {
+        floatData[slot][rowIdx >> CHUNK_BITS][rowIdx & CHUNK_MASK] = v;
+    }
+    public void writeInt(int slot, int rowIdx, int v) {
+        intData[slot][rowIdx >> CHUNK_BITS][rowIdx & CHUNK_MASK] = v;
+    }
+    public void writeLong(int slot, int rowIdx, long v) {
+        longData[slot][rowIdx >> CHUNK_BITS][rowIdx & CHUNK_MASK] = v;
+    }
+    public void writeString(int slot, int rowIdx, String v) {
+        stringData[slot][rowIdx >> CHUNK_BITS][rowIdx & CHUNK_MASK] = v != null ? v.intern() : null;
+    }
+
     // ── Getters / Setters ─────────────────────────────────────────
 
     public int          getRowCount()    { return rowCount; }
