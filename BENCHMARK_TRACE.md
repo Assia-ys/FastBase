@@ -2,7 +2,7 @@
 
 | Paramètre | Valeur |
 |-----------|--------|
-| Date      | `2026-05-28 22:15:40` |
+| Date      | `2026-05-28 23:35:35` |
 | Fichier   | `yellow_tripdata_combined.parquet` |
 | Lignes totales | 70 560 406 |
 | Heap max JVM   | 14 336 MB |
@@ -123,32 +123,6 @@ applyGroupBy(table, null, ...); // for (int i = 0; i < rowCount; i++)
 
 | Lignes | LOAD (ms) | R1 (ms) | R2 (ms) | R3 (ms) | R4 (ms) |
 |-------:|----------:|--------:|--------:|--------:|--------:|
-| 4 000 000 | 3376 | 197 | 249 | 195 | 104 |
-| 10 000 000 | 11874 | 217 | 103 | 117 | 76 |
-| 20 000 000 | 22946 | 277 | 207 | 286 | 213 |
-| 30 000 000 | 35020 | 400 | 409 | 319 | 237 |
-| 40 000 000 | 50649 | 483 | 498 | 404 | 455 |
-| 50 000 000 | 64509 | 589 | 707 | 570 | 353 |
-| 60 000 000 | 81441 | 738 | 718 | 680 | 459 |
-| 70 000 000 | 97436 | 802 | 1093 | 877 | 728 |
-| 70 560 406 | 99810 | 849 | 1227 | 798 | 603 |
-
----
-
-## Résumé final
-
-- **Lignes chargées** : 70 560 406
-- **Heap max JVM**    : 14336 MB
-
-### Résultats des requêtes (données complètes)
-
-| Requête | Description | Groupes | Temps |
-|---------|-------------|--------:|------:|
-| R1 | GROUP BY payment_type | 6 | 849 ms |
-| R2 | GROUP BY passenger_count WHERE pc>0 AND dist>0 | 11 | 1227 ms |
-| R3 | GROUP BY DOLocationID WHERE tip>0 | 261 | 798 ms |
-| R4 | GROUP BY payment_type SUM | 6 | 603 ms |
-
----
-
-*Généré automatiquement par FastBase BenchmarkDemo*
+| 4 000 000 | 2819 | 170 | 276 | 270 | 55 |
+| 10 000 000 | 8594 | 87 | 71 | 66 | 108 |
+| 20 000 000 | 19209 | 177 | 288 | 249 | 206 |

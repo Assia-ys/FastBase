@@ -289,26 +289,91 @@ public class QueryService {
         }
 
         // Chemin général : String key (GROUP BY texte ou multi-colonnes)
+        // Même stratégie que le chemin numérique : maps thread-locales + fusion.
+        final int[]         gIdx    = groupIdx;
+        final List<AggInfo> aggList = aggs;
+        final int[]         slotArr = slot;
+        final int           nacc    = nAcc;
+
+        if (rowCount > 500_000) {
+            int nCpu  = Runtime.getRuntime().availableProcessors();
+            int chunk = (rowCount + nCpu - 1) / nCpu;
+            @SuppressWarnings("unchecked")
+            Map<String, GroupAcc>[] locals = new HashMap[nCpu];
+            for (int t = 0; t < nCpu; t++) locals[t] = new HashMap<>();
+
+            IntStream.range(0, nCpu).parallel().forEach(t -> {
+                int from = t * chunk, to = Math.min(from + chunk, rowCount);
+                Map<String, GroupAcc> local = locals[t];
+                for (int r = from; r < to; r++) {
+                    if (cond != null && !cond.matches(r, table)) continue;
+                    String key = buildGroupKey(r, table, gIdx);
+                    GroupAcc acc = local.get(key);
+                    if (acc == null) {
+                        Object[] gv = new Object[gIdx.length];
+                        for (int j = 0; j < gIdx.length; j++) gv[j] = table.getValue(r, gIdx[j]);
+                        acc = new GroupAcc(gv, nacc);
+                        local.put(key, acc);
+                    }
+                    acc.count++;
+                    for (int j = 0; j < aggList.size(); j++) {
+                        if (slotArr[j] < 0) continue;
+                        double d = table.getNumericRaw(aggList.get(j).colIdx(), r);
+                        if (!Double.isNaN(d)) {
+                            acc.sums[slotArr[j]] += d;
+                            if (d < acc.mins[slotArr[j]]) acc.mins[slotArr[j]] = d;
+                            if (d > acc.maxs[slotArr[j]]) acc.maxs[slotArr[j]] = d;
+                            acc.hasVal[slotArr[j]] = true;
+                        }
+                    }
+                }
+            });
+
+            Map<String, GroupAcc> merged = locals[0];
+            for (int t = 1; t < nCpu; t++) {
+                for (Map.Entry<String, GroupAcc> e : locals[t].entrySet()) {
+                    GroupAcc src = e.getValue(), dst = merged.get(e.getKey());
+                    if (dst == null) { merged.put(e.getKey(), src); continue; }
+                    dst.count += src.count;
+                    for (int j = 0; j < nacc; j++) {
+                        dst.sums[j] += src.sums[j];
+                        if (src.mins[j] < dst.mins[j]) dst.mins[j] = src.mins[j];
+                        if (src.maxs[j] > dst.maxs[j]) dst.maxs[j] = src.maxs[j];
+                        if (src.hasVal[j]) dst.hasVal[j] = true;
+                    }
+                }
+            }
+            List<Map<String, Object>> results = new ArrayList<>(merged.size());
+            for (GroupAcc acc : merged.values()) {
+                Map<String, Object> result = new HashMap<>();
+                for (int i = 0; i < groupByCols.size(); i++) result.put(groupByCols.get(i), acc.groupVals[i]);
+                addAggResults(result, acc, aggList, slotArr);
+                results.add(result);
+            }
+            return results;
+        }
+
+        // Séquentiel pour petites tables
         Map<String, GroupAcc> groups = new HashMap<>();
         for (int r = 0; r < rowCount; r++) {
             if (cond != null && !cond.matches(r, table)) continue;
-            String key = buildGroupKey(r, table, groupIdx);
+            String key = buildGroupKey(r, table, gIdx);
             GroupAcc acc = groups.get(key);
             if (acc == null) {
-                Object[] gv = new Object[groupIdx.length];
-                for (int j = 0; j < groupIdx.length; j++) gv[j] = table.getValue(r, groupIdx[j]);
-                acc = new GroupAcc(gv, nAcc);
+                Object[] gv = new Object[gIdx.length];
+                for (int j = 0; j < gIdx.length; j++) gv[j] = table.getValue(r, gIdx[j]);
+                acc = new GroupAcc(gv, nacc);
                 groups.put(key, acc);
             }
             acc.count++;
-            for (int j = 0; j < aggs.size(); j++) {
-                if (slot[j] < 0) continue;
-                double d = table.getNumericRaw(aggs.get(j).colIdx(), r);
+            for (int j = 0; j < aggList.size(); j++) {
+                if (slotArr[j] < 0) continue;
+                double d = table.getNumericRaw(aggList.get(j).colIdx(), r);
                 if (!Double.isNaN(d)) {
-                    acc.sums[slot[j]] += d;
-                    if (d < acc.mins[slot[j]]) acc.mins[slot[j]] = d;
-                    if (d > acc.maxs[slot[j]]) acc.maxs[slot[j]] = d;
-                    acc.hasVal[slot[j]] = true;
+                    acc.sums[slotArr[j]] += d;
+                    if (d < acc.mins[slotArr[j]]) acc.mins[slotArr[j]] = d;
+                    if (d > acc.maxs[slotArr[j]]) acc.maxs[slotArr[j]] = d;
+                    acc.hasVal[slotArr[j]] = true;
                 }
             }
         }
@@ -316,7 +381,7 @@ public class QueryService {
         for (GroupAcc acc : groups.values()) {
             Map<String, Object> result = new HashMap<>();
             for (int i = 0; i < groupByCols.size(); i++) result.put(groupByCols.get(i), acc.groupVals[i]);
-            addAggResults(result, acc, aggs, slot);
+            addAggResults(result, acc, aggList, slotArr);
             results.add(result);
         }
         return results;
