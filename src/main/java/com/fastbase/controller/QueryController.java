@@ -25,7 +25,10 @@ public class QueryController {
                 request.getTableName(),
                 request.getSelectColumns(),
                 request.getWhereCondition(),
-                request.getGroupByColumns()
+                request.getGroupByColumns(),
+                request.getOrderBy(),
+                request.getOrderDir(),
+                request.getLimit()
         );
         return Map.of("rowCount", results.size(), "executionMs", System.currentTimeMillis() - start, "data", results);
     }
