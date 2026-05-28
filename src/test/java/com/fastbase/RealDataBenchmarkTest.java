@@ -30,7 +30,7 @@ class RealDataBenchmarkTest {
     private static final FileFormat DATA_FORMAT = FileFormat.valueOf(
             System.getProperty("fastbase.benchmark.format", "PARQUET").toUpperCase());
     private static final String DATA_PATH = System.getProperty(
-            "fastbase.benchmark.path", "../data_NYC/yellow_tripdata_2016-01.parquet");
+            "fastbase.benchmark.path", "../../data_NYC/yellow_tripdata_combined.parquet");
 
     // Schéma complet des 19 colonnes NYC Taxi Yellow Trip 2022
     // Différences par rapport à 2016 : suppression lat/lon, ajout PULocationID/DOLocationID,
@@ -57,7 +57,7 @@ class RealDataBenchmarkTest {
             new Column("airport_fee",           ColumnType.DOUBLE)
     );
 
-    private static final int[] SCALES = {100_000, 500_000, 1_000_000, 2_000_000, 4_000_000, 6_000_000, 8_000_000, 10_000_000};
+    private static int[] SCALES;
     private static final List<String> CSV_LINES = new ArrayList<>();
 
     private static DataStorage      dataStorage;
@@ -82,6 +82,13 @@ class RealDataBenchmarkTest {
         CSV_LINES.add("operation,rowCount,elapsedMs,elapsedNs");
 
         downloadIfNeeded();
+
+        long total = dataLoaderService.countParquetRows(DATA_PATH);
+        List<Integer> scaleList = new ArrayList<>(List.of(100_000, 500_000, 1_000_000, 2_000_000, 4_000_000));
+        int next = 6_000_000;
+        while (next < total) { scaleList.add(next); next += 2_000_000; }
+        if (scaleList.get(scaleList.size() - 1) < total) scaleList.add((int) total);
+        SCALES = scaleList.stream().mapToInt(Integer::intValue).toArray();
     }
 
     private static void downloadIfNeeded() throws IOException {

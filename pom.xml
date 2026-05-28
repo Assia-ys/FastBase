@@ -83,6 +83,9 @@
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
+				<configuration>
+					<layout>ZIP</layout>
+				</configuration>
 			</plugin>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
@@ -90,6 +93,19 @@
 				<configuration>
 					<!-- Benchmarks réels jusqu'à 4M lignes : la table est matérialisée en mémoire. -->
 					<argLine>-Xms512m -Xmx12g -XX:+UseG1GC -XX:MaxGCPauseMillis=200</argLine>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.codehaus.mojo</groupId>
+				<artifactId>exec-maven-plugin</artifactId>
+				<version>3.1.0</version>
+				<configuration>
+					<mainClass>com.fastbase.demo.BenchmarkDemo</mainClass>
+					<jvmArgs>
+						<jvmArg>-Xmx20g</jvmArg>
+						<jvmArg>-Xms4g</jvmArg>
+						<jvmArg>-XX:+UseG1GC</jvmArg>
+					</jvmArgs>
 				</configuration>
 			</plugin>
 		</plugins>

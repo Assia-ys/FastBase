@@ -8,7 +8,9 @@ import com.fastbase.service.TableService;
 import com.fastbase.storage.DataStorage;
 import com.fastbase.storage.InMemoryStorage;
 
-import java.io.IOException;
+import java.io.*;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.file.*;
 import java.util.*;
 
@@ -27,7 +29,10 @@ import java.util.*;
 public class BenchmarkDemo {
 
     private static final String DATA_PATH =
-            System.getProperty("fastbase.demo.path", "../data_NYC/yellow_tripdata_2016-01.parquet");
+            System.getProperty("fastbase.demo.path", "../../data_NYC/yellow_tripdata_combined.parquet");
+
+    private static final String PARQUET_URL =
+            "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2016-01.parquet";
 
     private static final List<Column> SCHEMA = List.of(
             new Column("VendorID",              ColumnType.INTEGER),
@@ -209,12 +214,7 @@ public class BenchmarkDemo {
         banner();
 
         Path dataFile = Path.of(DATA_PATH);
-        if (!Files.exists(dataFile)) {
-            System.out.println("  ERREUR : fichier introuvable -> " + dataFile.toAbsolutePath());
-            System.out.println("  Lancez d'abord : mvnw.cmd test -Dtest=RealDataBenchmarkTest");
-            System.out.println("  (téléchargement automatique ~130 Mo)");
-            return;
-        }
+        downloadIfNeeded(dataFile);
 
         DataStorage       storage = new InMemoryStorage();
         DataLoaderService loader  = new DataLoaderService(storage);
@@ -342,6 +342,55 @@ public class BenchmarkDemo {
         System.out.println();
 
         storage.deleteTable(tableName);
+    }
+
+    // ── Téléchargement automatique ────────────────────────────────────────
+
+    private static void downloadIfNeeded(Path dest) throws IOException {
+        if (Files.exists(dest)) return;
+        Files.createDirectories(dest.getParent() != null ? dest.getParent() : Path.of("."));
+        System.out.println("  Fichier absent — téléchargement automatique depuis NYC TLC Open Data");
+        System.out.println("  URL         : " + PARQUET_URL);
+        System.out.println("  Destination : " + dest.toAbsolutePath());
+        System.out.println("  (environ 130 Mo, patience...)\n");
+
+        HttpURLConnection conn = (HttpURLConnection) new URL(PARQUET_URL).openConnection();
+        conn.setConnectTimeout(30_000);
+        conn.setReadTimeout(600_000);
+        conn.setRequestProperty("User-Agent", "FastBase-Demo/1.0");
+
+        int status = conn.getResponseCode();
+        if (status != HttpURLConnection.HTTP_OK)
+            throw new IOException("Téléchargement échoué — HTTP " + status);
+
+        long   total      = conn.getContentLengthLong();
+        byte[] buffer     = new byte[256 * 1024];
+        long   downloaded = 0;
+        long   lastPrint  = System.currentTimeMillis();
+
+        try (InputStream  in  = new BufferedInputStream(conn.getInputStream());
+             OutputStream out = Files.newOutputStream(dest)) {
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
+                downloaded += read;
+                long now = System.currentTimeMillis();
+                if (now - lastPrint >= 3_000) {
+                    if (total > 0)
+                        System.out.printf("  %,d Mo / %,d Mo  (%.0f%%)%n",
+                                downloaded / 1_048_576, total / 1_048_576,
+                                100.0 * downloaded / total);
+                    else
+                        System.out.printf("  %,d Mo téléchargés...%n", downloaded / 1_048_576);
+                    lastPrint = now;
+                }
+            }
+        } catch (IOException e) {
+            Files.deleteIfExists(dest);
+            throw e;
+        }
+        System.out.printf("%n  Téléchargement terminé : %,d Mo%n%n",
+                Files.size(dest) / 1_048_576);
     }
 
     // ── Affichage ─────────────────────────────────────────────────────────
