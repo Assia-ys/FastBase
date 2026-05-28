@@ -16,6 +16,10 @@ import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.file.*;
+import java.security.KeyManagementException;
+import java.security.NoSuchAlgorithmException;
+import java.security.cert.X509Certificate;
+import javax.net.ssl.*;
 import java.util.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -103,7 +107,7 @@ class RealDataBenchmarkTest {
         System.out.println("Destination : " + dataPath.toAbsolutePath());
         System.out.println("(environ 130 Mo pour le Parquet 2016-01, patience...)\n");
 
-        HttpURLConnection conn = (HttpURLConnection) new URL(downloadUrl).openConnection();
+        HttpURLConnection conn = (HttpURLConnection) trustAllConnection(downloadUrl);
         conn.setConnectTimeout(30_000);
         conn.setReadTimeout(600_000);
         conn.setRequestProperty("User-Agent", "FastBase-Benchmark/1.0");
@@ -141,6 +145,23 @@ class RealDataBenchmarkTest {
 
         System.out.printf("%nTéléchargement terminé : %,d Mo → %s%n%n",
                 Files.size(dataPath) / 1_048_576, dataPath.toAbsolutePath());
+    }
+
+    // Contourne la validation SSL des proxys d'entreprise/université
+    private static HttpURLConnection trustAllConnection(String url) throws IOException {
+        try {
+            SSLContext sc = SSLContext.getInstance("TLS");
+            sc.init(null, new TrustManager[]{new X509TrustManager() {
+                public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+                public void checkClientTrusted(X509Certificate[] c, String a) {}
+                public void checkServerTrusted(X509Certificate[] c, String a) {}
+            }}, new java.security.SecureRandom());
+            HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());
+            HttpsURLConnection.setDefaultHostnameVerifier((h, s) -> true);
+        } catch (NoSuchAlgorithmException | KeyManagementException e) {
+            throw new IOException("Impossible d'initialiser le contexte SSL : " + e.getMessage(), e);
+        }
+        return (HttpURLConnection) new URL(url).openConnection();
     }
 
     @AfterAll
