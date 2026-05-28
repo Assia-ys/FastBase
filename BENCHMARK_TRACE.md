@@ -2,7 +2,7 @@
 
 | Paramètre | Valeur |
 |-----------|--------|
-| Date      | `2026-05-28 19:45:14` |
+| Date      | `2026-05-28 22:15:40` |
 | Fichier   | `yellow_tripdata_combined.parquet` |
 | Lignes totales | 70 560 406 |
 | Heap max JVM   | 14 336 MB |
@@ -121,34 +121,33 @@ applyGroupBy(table, null, ...); // for (int i = 0; i < rowCount; i++)
 
 ## Résultats par palier
 
-| Lignes | LOAD (ms) | R1 (ms) | R2 (ms) | R3 (ms) | R4 (ms) | Heap (MB) | Note |
-|-------:|----------:|--------:|--------:|--------:|--------:|----------:|------|
-| 4 000 000 | 2557 | 188 | 272 | 235 | 61 | 637 | heap Δ: +578 MB |
-| 10 000 000 | 8684 | 178 | 90 | 78 | 48 | 2318 | heap Δ: +1333 MB |
-| 20 000 000 | 18511 | 253 | 185 | 118 | 107 | 2865 | heap Δ: +1321 MB |
-| 30 000 000 | 29504 | 541 | 387 | 327 | 218 | 3537 | heap Δ: +806 MB |
-| 40 000 000 | 41931 | 563 | 450 | 379 | 389 | 4505 | heap Δ: +1151 MB |
-| 50 000 000 | 54944 | 556 | 718 | 481 | 318 | 4848 | heap Δ: +500 MB |
-| 60 000 000 | 68714 | 632 | 744 | 734 | 424 | 5575 | heap Δ: +-1077 MB |
-| 70 000 000 | 82484 | 708 | 920 | 667 | 757 | 7297 | heap Δ: +-570 MB |
-| 70 560 406 | 84555 | 696 | 1324 | 634 | 770 | 7822 | heap Δ: +1017 MB |
+| Lignes | LOAD (ms) | R1 (ms) | R2 (ms) | R3 (ms) | R4 (ms) |
+|-------:|----------:|--------:|--------:|--------:|--------:|
+| 4 000 000 | 3376 | 197 | 249 | 195 | 104 |
+| 10 000 000 | 11874 | 217 | 103 | 117 | 76 |
+| 20 000 000 | 22946 | 277 | 207 | 286 | 213 |
+| 30 000 000 | 35020 | 400 | 409 | 319 | 237 |
+| 40 000 000 | 50649 | 483 | 498 | 404 | 455 |
+| 50 000 000 | 64509 | 589 | 707 | 570 | 353 |
+| 60 000 000 | 81441 | 738 | 718 | 680 | 459 |
+| 70 000 000 | 97436 | 802 | 1093 | 877 | 728 |
+| 70 560 406 | 99810 | 849 | 1227 | 798 | 603 |
 
 ---
 
 ## Résumé final
 
 - **Lignes chargées** : 70 560 406
-- **Heap utilisé**    : 6672 MB
 - **Heap max JVM**    : 14336 MB
 
 ### Résultats des requêtes (données complètes)
 
 | Requête | Description | Groupes | Temps |
 |---------|-------------|--------:|------:|
-| R1 | GROUP BY payment_type | 6 | 696 ms |
-| R2 | GROUP BY passenger_count WHERE pc>0 AND dist>0 | 11 | 1324 ms |
-| R3 | GROUP BY DOLocationID WHERE tip>0 | 261 | 634 ms |
-| R4 | GROUP BY payment_type SUM | 6 | 770 ms |
+| R1 | GROUP BY payment_type | 6 | 849 ms |
+| R2 | GROUP BY passenger_count WHERE pc>0 AND dist>0 | 11 | 1227 ms |
+| R3 | GROUP BY DOLocationID WHERE tip>0 | 261 | 798 ms |
+| R4 | GROUP BY payment_type SUM | 6 | 603 ms |
 
 ---
 

@@ -324,7 +324,7 @@ public class QueryService {
 
     private List<Map<String, Object>> buildNumericResults(
             Map<Long, GroupAcc> groups, List<String> groupByCols,
-            List<AggInfo> aggs, int[] slot) {
+            List<    AggInfo> aggs, int[] slot) {
         List<Map<String, Object>> results = new ArrayList<>(groups.size());
         for (GroupAcc acc : groups.values()) {
             Map<String, Object> result = new HashMap<>();
@@ -482,7 +482,7 @@ public class QueryService {
         return expr.substring(expr.indexOf('(') + 1, expr.indexOf(')')).trim();
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({"unchecked", "rawtypes"})
     private int compareValues(Object va, Object vb) {
         if (va == null && vb == null) return 0;
         if (va == null) return 1; if (vb == null) return -1;

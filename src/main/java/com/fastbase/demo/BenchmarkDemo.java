@@ -278,19 +278,19 @@ public class BenchmarkDemo {
             trace.println();
             trace.println("## Résultats par palier");
             trace.println();
-            trace.println("| Lignes | LOAD (ms) | R1 (ms) | R2 (ms) | R3 (ms) | R4 (ms) | Heap (MB) | Note |");
-            trace.println("|-------:|----------:|--------:|--------:|--------:|--------:|----------:|------|");
+            trace.println("| Lignes | LOAD (ms) | R1 (ms) | R2 (ms) | R3 (ms) | R4 (ms) |");
+            trace.println("|-------:|----------:|--------:|--------:|--------:|--------:|");
 
             // ── CHARGEMENT INCRÉMENTAL + REQUÊTES ────────────────────────────
             sep('═', "CHARGEMENT + EXÉCUTION DES REQUÊTES");
-            System.out.printf("  %-14s  %-10s  %-9s  %-9s  %-9s  %-9s  %-10s%n",
-                    "Lignes total", "LOAD", "R1 (ms)", "R2 (ms)", "R3 (ms)", "R4 (ms)", "Heap MB");
-            System.out.println("  " + "─".repeat(83));
+            System.out.printf("  %-14s  %-10s  %-9s  %-9s  %-9s  %-9s%n",
+                    "Lignes total", "LOAD", "R1 (ms)", "R2 (ms)", "R3 (ms)", "R4 (ms)");
+            System.out.println("  " + "─".repeat(70));
 
             tables.createTable(tableName, new ArrayList<>(SCHEMA));
 
             List<String> benchLines = new ArrayList<>();
-            benchLines.add("lignes,LOAD_ms,R1_ms,R2_ms,R3_ms,R4_ms,heap_mb");
+            benchLines.add("lignes,LOAD_ms,R1_ms,R2_ms,R3_ms,R4_ms");
 
             int  prevScale = 0;
             long totalLoadMs = 0;
@@ -303,12 +303,10 @@ public class BenchmarkDemo {
             for (int scale : scales) {
                 int delta = scale - prevScale;
 
-                long heapBefore = usedHeapMb();
-                long t0         = System.nanoTime();
-                int  added      = loader.loadParquetData(tableName, DATA_PATH, prevScale, delta);
-                long loadMs     = (System.nanoTime() - t0) / 1_000_000;
-                totalLoadMs    += loadMs;
-                long heapAfter  = usedHeapMb();
+                long t0     = System.nanoTime();
+                int  added  = loader.loadParquetData(tableName, DATA_PATH, prevScale, delta);
+                long loadMs = (System.nanoTime() - t0) / 1_000_000;
+                totalLoadMs += loadMs;
 
                 int     actual = prevScale + added;
                 boolean eof    = added < delta;
@@ -319,19 +317,15 @@ public class BenchmarkDemo {
                 tq = System.nanoTime(); r3 = query.execute(tableName, R3_COLS, R3_WHERE,  R3_GROUPBY, R3_ORDERBY, R3_DIR, null); r3Ms = (System.nanoTime()-tq)/1_000_000;
                 tq = System.nanoTime(); r4 = query.execute(tableName, R4_COLS, null,     R4_GROUPBY, R4_ORDERBY, R4_DIR, null); r4Ms = (System.nanoTime()-tq)/1_000_000;
 
-                System.out.printf("  %,14d  %7d ms  %6d     %6d     %6d     %6d     %6d MB%s%n",
-                        actual, totalLoadMs, r1Ms, r2Ms, r3Ms, r4Ms, heapAfter,
+                System.out.printf("  %,14d  %7d ms  %6d     %6d     %6d     %6d%s%n",
+                        actual, totalLoadMs, r1Ms, r2Ms, r3Ms, r4Ms,
                         eof ? "  ← FIN DU FICHIER" : "");
 
-                // Trace Markdown
-                String note = eof
-                        ? "⬅ fin du fichier"
-                        : "heap Δ: +" + (heapAfter - heapBefore) + " MB";
-                trace.printf("| %,d | %d | %d | %d | %d | %d | %d | %s |%n",
-                        actual, totalLoadMs, r1Ms, r2Ms, r3Ms, r4Ms, heapAfter, note);
+                trace.printf("| %,d | %d | %d | %d | %d | %d |%n",
+                        actual, totalLoadMs, r1Ms, r2Ms, r3Ms, r4Ms);
                 trace.flush();
 
-                benchLines.add(actual + "," + totalLoadMs + "," + r1Ms + "," + r2Ms + "," + r3Ms + "," + r4Ms + "," + heapAfter);
+                benchLines.add(actual + "," + totalLoadMs + "," + r1Ms + "," + r2Ms + "," + r3Ms + "," + r4Ms);
                 prevScale = actual;
                 if (eof) break;
             }
@@ -343,7 +337,6 @@ public class BenchmarkDemo {
             trace.println("## Résumé final");
             trace.println();
             trace.printf ("- **Lignes chargées** : %,d%n", prevScale);
-            trace.printf ("- **Heap utilisé**    : %d MB%n", usedHeapMb());
             trace.printf ("- **Heap max JVM**    : %d MB%n", Runtime.getRuntime().maxMemory() / 1_048_576);
             trace.println();
             trace.println("### Résultats des requêtes (données complètes)");
@@ -421,12 +414,7 @@ public class BenchmarkDemo {
         storage.deleteTable(tableName);
     }
 
-    // ── Mémoire ──────────────────────────────────────────────────────────
 
-    private static long usedHeapMb() {
-        Runtime rt = Runtime.getRuntime();
-        return (rt.totalMemory() - rt.freeMemory()) / 1_048_576;
-    }
 
     private static void traceJvmInfo(PrintWriter trace) {
         Runtime rt = Runtime.getRuntime();
