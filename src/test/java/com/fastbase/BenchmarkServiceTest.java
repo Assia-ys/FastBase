@@ -19,6 +19,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
+import org.junit.jupiter.api.Assumptions;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -51,6 +53,30 @@ class BenchmarkServiceTest {
 
     private static final String[] CATEGORIES = {"ELEC", "FOOD", "CLOTHING", "SPORT", "BEAUTY"};
     private static final String[] REGIONS     = {"NORD", "SUD", "EST", "OUEST", "CENTRE"};
+
+    // Schéma complet NYC Yellow Taxi 2022 (19 colonnes) — pour le benchmark grand volume
+    private static final List<Column> SCHEMA_TAXI = List.of(
+            new Column("VendorID",              ColumnType.INTEGER),
+            new Column("tpep_pickup_datetime",  ColumnType.LONG),
+            new Column("tpep_dropoff_datetime", ColumnType.LONG),
+            new Column("passenger_count",       ColumnType.DOUBLE),
+            new Column("trip_distance",         ColumnType.DOUBLE),
+            new Column("RatecodeID",            ColumnType.DOUBLE),
+            new Column("store_and_fwd_flag",    ColumnType.STRING),
+            new Column("PULocationID",          ColumnType.INTEGER),
+            new Column("DOLocationID",          ColumnType.INTEGER),
+            new Column("payment_type",          ColumnType.INTEGER),
+            new Column("fare_amount",           ColumnType.DOUBLE),
+            new Column("extra",                 ColumnType.DOUBLE),
+            new Column("mta_tax",               ColumnType.DOUBLE),
+            new Column("tip_amount",            ColumnType.DOUBLE),
+            new Column("tolls_amount",          ColumnType.DOUBLE),
+            new Column("improvement_surcharge", ColumnType.DOUBLE),
+            new Column("total_amount",          ColumnType.DOUBLE),
+            new Column("congestion_surcharge",  ColumnType.DOUBLE),
+            new Column("airport_fee",           ColumnType.DOUBLE));
+
+    private static final double[] EXTRA_VALUES = {0.0, 0.5, 1.0};
 
     // Accumulation des résultats pour l'export CSV final
     private static final List<BenchmarkService.BenchmarkResult> ALL_RESULTS = new ArrayList<>();
@@ -389,11 +415,168 @@ class BenchmarkServiceTest {
     }
 
     // -----------------------------------------------------------------------
-    // 8. EXPORT CSV manuel
+    // 9. BENCHMARK PROGRESSIF 19 COLONNES NYC TAXI
+    //    Une seule table, chargement incrémental : 4M→20M→50M→60M.
+    //    Requêtes : SELECT, WHERE simple/complexe, GROUP BY simple/complexe, TOP-N.
     // -----------------------------------------------------------------------
 
     @Test
     @Order(9)
+    @DisplayName("BENCHMARK NYC Taxi 19 col — 4M→20M→50M→60M, toutes requêtes")
+    void benchmarkTaxiScales() {
+        Assumptions.assumeTrue(
+                Runtime.getRuntime().maxMemory() >= 8L * 1024 * 1024 * 1024,
+                "Heap < 8 GB — relancer avec -Xmx12g");
+
+        int[] milestones = {4_000_000, 20_000_000, 50_000_000, 60_000_000};
+        long maxMem = Runtime.getRuntime().maxMemory();
+
+        String tableName = "bench_taxi";
+        dataStorage.deleteTable(tableName);
+        tableService.createTable(tableName, new ArrayList<>(SCHEMA_TAXI));
+
+        System.out.println("\n─── BENCHMARK NYC TAXI 19 COLONNES — 4M / 20M / 50M / 60M ────────────────────────────────────────");
+        System.out.printf("%-10s %7s %7s %8s %8s %8s %8s %8s%n",
+                "Lignes", "LOAD", "SELECT", "WHERE_S", "WHERE_C", "GRP_S", "GRP_C", "TOP100");
+        System.out.println("─".repeat(76));
+
+        int  loaded          = 0;
+        long cumulativeLoadMs = 0;
+        for (int milestone : milestones) {
+            long estMemMB = (long) milestone * 152 / 1024 / 1024;
+            long threshMB = maxMem * 9 / 10 / 1024 / 1024;
+            if (estMemMB > threshMB) {
+                System.out.printf("%-10d  SKIPPED — ~%,d MB > seuil %,d MB%n", milestone, estMemMB, threshMB);
+                continue;
+            }
+
+            // GC avant allocation pour libérer les temporaires du palier précédent
+            System.gc();
+            try { Thread.sleep(800); } catch (InterruptedException ignored) {}
+            System.gc();
+
+            dataStorage.getTable(tableName).orElseThrow().reserveCapacity(milestone);
+
+            int delta = milestone - loaded;
+            long t0 = System.nanoTime();
+            fillDirectTaxiDelta(tableName, delta);
+            cumulativeLoadMs += (System.nanoTime() - t0) / 1_000_000;
+            loaded = milestone;
+            String tag = milestone / 1_000_000 + "M";
+
+            // LOAD affiché = temps cumulé depuis le début (plus intuitif que le delta seul)
+            ALL_RESULTS.add(new BenchmarkService.BenchmarkResult("LOAD_" + tag, milestone, cumulativeLoadMs, cumulativeLoadMs * 1_000_000));
+
+            // SELECT fare_amount, total_amount — scan complet
+            BenchmarkService.BenchmarkResult sel   = benchmarkService.benchmarkSelect(tableName, List.of("fare_amount", "total_amount"), null);
+            ALL_RESULTS.add(new BenchmarkService.BenchmarkResult("SELECT_" + tag,   sel.rowCount(),   sel.elapsedMs(), sel.elapsedNs()));
+
+            // WHERE simple : numérique (fare_amount > 10, ~90% passent)
+            BenchmarkService.BenchmarkResult whereS = benchmarkService.benchmarkSelect(tableName, List.of("fare_amount", "total_amount"), "fare_amount>10");
+            ALL_RESULTS.add(new BenchmarkService.BenchmarkResult("WHERE_S_" + tag,  whereS.rowCount(), whereS.elapsedMs(), whereS.elapsedNs()));
+
+            // WHERE complexe : entier (payment_type = 1, ~25% passent)
+            BenchmarkService.BenchmarkResult whereC = benchmarkService.benchmarkSelect(tableName, List.of("passenger_count", "trip_distance"), "payment_type=1");
+            ALL_RESULTS.add(new BenchmarkService.BenchmarkResult("WHERE_C_" + tag,  whereC.rowCount(), whereC.elapsedMs(), whereC.elapsedNs()));
+
+            // GROUP BY simple : VendorID (2 groupes), 1 agrégat SUM
+            BenchmarkService.BenchmarkResult grpS  = benchmarkService.benchmarkGroupBy(tableName,
+                    List.of("VendorID", "SUM(total_amount)"), null, List.of("VendorID"));
+            ALL_RESULTS.add(new BenchmarkService.BenchmarkResult("GRP_S_" + tag,    grpS.rowCount(),  grpS.elapsedMs(), grpS.elapsedNs()));
+
+            // GROUP BY complexe : passenger_count (6 groupes), 4 agrégats
+            BenchmarkService.BenchmarkResult grpC  = benchmarkService.benchmarkGroupBy(tableName,
+                    List.of("passenger_count", "COUNT(VendorID)", "SUM(trip_distance)", "SUM(total_amount)", "SUM(tip_amount)"),
+                    null, List.of("passenger_count"));
+            ALL_RESULTS.add(new BenchmarkService.BenchmarkResult("GRP_C_" + tag,    grpC.rowCount(),  grpC.elapsedMs(), grpC.elapsedNs()));
+
+            // TOP-N : ORDER BY fare_amount DESC LIMIT 100 (heap O(n log N))
+            long tTop = System.nanoTime();
+            List<Map<String, Object>> top100 = queryService.execute(
+                    tableName, List.of("fare_amount"), null, null, "fare_amount", "DESC", 100);
+            long topMs = (System.nanoTime() - tTop) / 1_000_000;
+            ALL_RESULTS.add(new BenchmarkService.BenchmarkResult("TOP100_" + tag,   top100.size(),    topMs,           topMs * 1_000_000));
+
+            System.out.printf("%-10d %7d %7d %8d %8d %8d %8d %8d%n",
+                    milestone, cumulativeLoadMs, sel.elapsedMs(), whereS.elapsedMs(), whereC.elapsedMs(),
+                    grpS.elapsedMs(), grpC.elapsedMs(), topMs);
+
+            assertThat(sel.rowCount()).isEqualTo(milestone);
+            assertThat(grpS.rowCount()).isEqualTo(2);
+            assertThat(grpC.rowCount()).isEqualTo(6);
+            assertThat(top100).hasSize(100);
+        }
+
+        dataStorage.deleteTable(tableName);
+        System.gc();
+    }
+
+    /**
+     * Ajoute {@code count} lignes au stockage colonnaire NYC Taxi 19 colonnes.
+     * Reprend depuis table.getRowCount() existant — zéro objet Row, zéro GC.
+     * reserveCapacity doit être appelé avant cette méthode (depuis le test).
+     */
+    private void fillDirectTaxiDelta(String tableName, int count) {
+        Table table = dataStorage.getTable(tableName).orElseThrow();
+        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+        String flagN = "N".intern();
+        String flagY = "Y".intern();
+        final long BASE_TS = 1_640_995_200L; // 2022-01-01 00:00:00 UTC
+        final int BATCH = 100_000;
+        for (int base = 0; base < count; ) {
+            int actual = Math.min(BATCH, count - base);
+            int start  = table.allocateBatch(actual);
+            for (int j = 0; j < actual; j++) {
+                int ri = start + j;
+                // 0: VendorID (1 ou 2, alternés)
+                table.setColumnValue(ri,  0, (ri % 2) + 1);
+                // 1-2: timestamps (pickup aléatoire sur janvier 2022, dropoff = pickup + 5..60 min)
+                long pickup = BASE_TS + rnd.nextLong(0, 2_678_400L);
+                table.setColumnValue(ri,  1, pickup);
+                table.setColumnValue(ri,  2, pickup + rnd.nextLong(300L, 3_600L));
+                // 3-5: passenger_count, trip_distance, RatecodeID
+                table.setColumnValue(ri,  3, (double) rnd.nextInt(1, 7));
+                table.setColumnValue(ri,  4, Math.round(rnd.nextDouble(0.1, 30.0) * 10) / 10.0);
+                table.setColumnValue(ri,  5, (double) rnd.nextInt(1, 7));
+                // 6: store_and_fwd_flag ("N" 99%, "Y" 1%)
+                table.setColumnValue(ri,  6, rnd.nextInt(100) < 1 ? flagY : flagN);
+                // 7-9: PULocationID, DOLocationID, payment_type
+                table.setColumnValue(ri,  7, rnd.nextInt(1, 266));
+                table.setColumnValue(ri,  8, rnd.nextInt(1, 266));
+                table.setColumnValue(ri,  9, rnd.nextInt(1, 5));
+                // 10: fare_amount [2.5 .. 80.0]
+                double fare = Math.round(rnd.nextDouble(2.5, 80.0) * 100) / 100.0;
+                table.setColumnValue(ri, 10, fare);
+                // 11: extra (0.0 / 0.5 / 1.0)
+                double extra = EXTRA_VALUES[rnd.nextInt(3)];
+                table.setColumnValue(ri, 11, extra);
+                // 12: mta_tax (0.5 fixe)
+                table.setColumnValue(ri, 12, 0.5);
+                // 13: tip_amount [0.0 .. 15.0]
+                double tip = Math.round(rnd.nextDouble(0.0, 15.0) * 100) / 100.0;
+                table.setColumnValue(ri, 13, tip);
+                // 14: tolls_amount (0 la plupart du temps)
+                double tolls = rnd.nextInt(10) < 1 ? Math.round(rnd.nextDouble(1.0, 8.0) * 100) / 100.0 : 0.0;
+                table.setColumnValue(ri, 14, tolls);
+                // 15: improvement_surcharge (0.3 fixe)
+                table.setColumnValue(ri, 15, 0.3);
+                // 16: total_amount = somme des composantes
+                table.setColumnValue(ri, 16, Math.round((fare + extra + 0.5 + tip + tolls + 0.3) * 100) / 100.0);
+                // 17: congestion_surcharge (2.5 à 70%, 0.0 sinon)
+                table.setColumnValue(ri, 17, rnd.nextInt(10) < 7 ? 2.5 : 0.0);
+                // 18: airport_fee (1.25 à 5%, 0.0 sinon)
+                table.setColumnValue(ri, 18, rnd.nextInt(20) < 1 ? 1.25 : 0.0);
+            }
+            base += actual;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 10. EXPORT CSV manuel
+    // -----------------------------------------------------------------------
+
+    @Test
+    @Order(10)
     @DisplayName("Export CSV — vérification du format de sortie")
     void exportCsvFormat() {
         BenchmarkService.BenchmarkResult dummy =

@@ -45,6 +45,40 @@ public class BenchmarkService {
         }
     }
 
+    public BenchmarkResult benchmarkParquetLoad(String tableName, String filePath, int maxRows) {
+        try {
+            long t0       = System.nanoTime();
+            int rowCount  = dataLoaderService.loadParquetData(tableName, filePath, maxRows);
+            long elapsed  = System.nanoTime() - t0;
+            return new BenchmarkResult("LOAD_PARQUET", rowCount, elapsed / 1_000_000, elapsed);
+        } catch (IOException e) {
+            throw new RuntimeException("Erreur benchmark LOAD PARQUET : " + e.getMessage(), e);
+        }
+    }
+
+    /** Chargement incrémental : rowCount retourné = skipRows + lignes ajoutées = total table. */
+    public BenchmarkResult benchmarkCsvLoad(String tableName, String filePath, int skipRows, int maxRows) {
+        try {
+            long t0      = System.nanoTime();
+            int added    = dataLoaderService.loadCsvData(tableName, filePath, skipRows, maxRows);
+            long elapsed = System.nanoTime() - t0;
+            return new BenchmarkResult("LOAD", skipRows + added, elapsed / 1_000_000, elapsed);
+        } catch (IOException e) {
+            throw new RuntimeException("Erreur benchmark LOAD : " + e.getMessage(), e);
+        }
+    }
+
+    public BenchmarkResult benchmarkParquetLoad(String tableName, String filePath, int skipRows, int maxRows) {
+        try {
+            long t0      = System.nanoTime();
+            int added    = dataLoaderService.loadParquetData(tableName, filePath, skipRows, maxRows);
+            long elapsed = System.nanoTime() - t0;
+            return new BenchmarkResult("LOAD_PARQUET", skipRows + added, elapsed / 1_000_000, elapsed);
+        } catch (IOException e) {
+            throw new RuntimeException("Erreur benchmark LOAD PARQUET : " + e.getMessage(), e);
+        }
+    }
+
     public BenchmarkResult benchmarkLoad(Table table, List<com.fastbase.model.Row> rows) {
         long t0      = System.nanoTime();
         table.addRows(rows);
@@ -54,9 +88,9 @@ public class BenchmarkService {
 
     public BenchmarkResult benchmarkSelect(String tableName, List<String> selectColumns, String whereCondition) {
         long t0 = System.nanoTime();
-        List<Map<String, Object>> results = queryService.execute(tableName, selectColumns, whereCondition, null);
+        long rowCount = queryService.scanSelectCount(tableName, selectColumns, whereCondition);
         long elapsed = System.nanoTime() - t0;
-        return new BenchmarkResult("SELECT", results.size(), elapsed / 1_000_000, elapsed);
+        return new BenchmarkResult("SELECT", rowCount, elapsed / 1_000_000, elapsed);
     }
 
     public BenchmarkResult benchmarkGroupBy(String tableName, List<String> selectColumns,
