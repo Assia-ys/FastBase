@@ -33,7 +33,13 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Chargement CSV et Parquet avec écriture directe dans le stockage colonnaire de Table.
@@ -174,66 +180,96 @@ public class DataLoaderService {
             int  totalAllocated = 0;
             PageReadStore pages;
 
+            // P16 : pipeline parallèle — main thread lit les row groups (I/O séquentiel),
+            // les workers décodent en parallèle (CPU).
+            // Safe car chaque worker a son propre ColumnReadStoreImpl + ColumnReader.
+            int nWorkers  = Runtime.getRuntime().availableProcessors();
+            int maxFlight = Math.min(nWorkers, 6); // max 6 PageReadStores en mémoire simultanément
+            ExecutorService pool      = Executors.newFixedThreadPool(nWorkers);
+            Semaphore       semaphore = new Semaphore(maxFlight);
+            List<Future<?>> futures   = new ArrayList<>();
+
+            final int[]       fColumnMapping   = columnMapping;
+            final boolean[]   fIsBoolSlot      = isBoolSlot;
+            final boolean[]   fIsDoubleParquet  = isDoubleParquet;
+            final int[]       fFltSlots        = fltSlots;
+            final int[]       fIntSlots        = intSlots;
+            final int[]       fLongSlots       = longSlots;
+            final int[]       fStrSlots        = strSlots;
+            final MessageType fSchema          = schema;
+            final List<ColumnDescriptor> fColDescs = colDescs;
+            final int         fNCols           = nCols;
+
             while ((pages = fileReader.readNextRowGroup()) != null) {
                 if (maxRows > 0 && totalAllocated >= maxRows) break;
                 int groupRows = (int) pages.getRowCount();
                 if (maxRows > 0) groupRows = Math.min(groupRows, maxRows - totalAllocated);
+
                 int startRow = table.allocateBatch(groupRows);
                 totalAllocated += groupRows;
 
-                // P15 : lecture colonnaire directe — zéro objet Group créé pour les numériques
-                // ColumnReader lit colonne par colonne → accès séquentiel aux float[]/int[]/long[]
-                // → ×3-5 moins d'allocations vs GroupRecordConverter row-by-row
-                ColumnReadStoreImpl cs = new ColumnReadStoreImpl(
-                        pages, new GroupRecordConverter(schema).getRootConverter(),
-                        schema, "parquet-mr");
+                semaphore.acquire();
+                final PageReadStore fp       = pages;
+                final int           fStart   = startRow;
+                final int           fRows    = groupRows;
 
-                for (int pi = 0; pi < nCols; pi++) {
-                    if (columnMapping[pi] < 0) continue;
-                    ColumnDescriptor desc = colDescs.get(pi);
-                    ColumnReader cr = cs.getColumnReader(desc);
-                    int maxDef = desc.getMaxDefinitionLevel();
-                    int flt = fltSlots[pi], ini = intSlots[pi], lng = longSlots[pi], str = strSlots[pi];
+                futures.add(pool.submit(() -> {
+                    try {
+                        ColumnReadStoreImpl cs = new ColumnReadStoreImpl(
+                                fp, new GroupRecordConverter(fSchema).getRootConverter(),
+                                fSchema, "parquet-mr");
 
-                    if (flt >= 0) {
-                        switch (colPtn[pi]) {
-                            case DOUBLE -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeFloat(flt, startRow + r, (float) cr.getDouble()); cr.consume(); } }
-                            case INT32  -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeFloat(flt, startRow + r, (float) cr.getInteger()); cr.consume(); } }
-                            case INT64  -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeFloat(flt, startRow + r, (float) cr.getLong()); cr.consume(); } }
-                            default     -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeFloat(flt, startRow + r, cr.getFloat()); cr.consume(); } }
-                        }
-                    } else if (ini >= 0) {
-                        if (isBoolSlot[pi]) {
-                            for (int r = 0; r < groupRows; r++) {
-                                if (cr.getCurrentDefinitionLevel() >= maxDef)
-                                    table.writeInt(ini, startRow + r, cr.getBoolean() ? 1 : 0);
-                                cr.consume();
+                        ColumnReader[] readers = new ColumnReader[fNCols];
+                        for (int pi = 0; pi < fNCols; pi++)
+                            if (fColumnMapping[pi] >= 0)
+                                readers[pi] = cs.getColumnReader(fColDescs.get(pi));
+
+                        for (int pi = 0; pi < fNCols; pi++) {
+                            ColumnReader cr = readers[pi];
+                            if (cr == null) continue;
+                            int maxDef = fColDescs.get(pi).getMaxDefinitionLevel();
+                            int flt = fFltSlots[pi], ini = fIntSlots[pi],
+                                lng = fLongSlots[pi], str = fStrSlots[pi];
+                            PrimitiveTypeName ptn = fColDescs.get(pi).getPrimitiveType().getPrimitiveTypeName();
+
+                            if (flt >= 0) {
+                                switch (ptn) {
+                                    case DOUBLE -> { for (int r = 0; r < fRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeFloat(flt, fStart + r, (float) cr.getDouble()); cr.consume(); } }
+                                    case INT32  -> { for (int r = 0; r < fRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeFloat(flt, fStart + r, (float) cr.getInteger()); cr.consume(); } }
+                                    case INT64  -> { for (int r = 0; r < fRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeFloat(flt, fStart + r, (float) cr.getLong()); cr.consume(); } }
+                                    default     -> { for (int r = 0; r < fRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeFloat(flt, fStart + r, cr.getFloat()); cr.consume(); } }
+                                }
+                            } else if (ini >= 0) {
+                                if (fIsBoolSlot[pi]) {
+                                    for (int r = 0; r < fRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeInt(ini, fStart + r, cr.getBoolean() ? 1 : 0); cr.consume(); }
+                                } else {
+                                    switch (ptn) {
+                                        case INT32  -> { for (int r = 0; r < fRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeInt(ini, fStart + r, cr.getInteger()); cr.consume(); } }
+                                        case INT64  -> { for (int r = 0; r < fRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeInt(ini, fStart + r, (int) cr.getLong()); cr.consume(); } }
+                                        case DOUBLE -> { for (int r = 0; r < fRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeInt(ini, fStart + r, (int) cr.getDouble()); cr.consume(); } }
+                                        default     -> { for (int r = 0; r < fRows; r++) cr.consume(); }
+                                    }
+                                }
+                            } else if (lng >= 0) {
+                                switch (ptn) {
+                                    case INT64  -> { for (int r = 0; r < fRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeLong(lng, fStart + r, cr.getLong()); cr.consume(); } }
+                                    case INT32  -> { for (int r = 0; r < fRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeLong(lng, fStart + r, (long) cr.getInteger()); cr.consume(); } }
+                                    default     -> { for (int r = 0; r < fRows; r++) cr.consume(); }
+                                }
+                            } else if (str >= 0) {
+                                for (int r = 0; r < fRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeString(str, fStart + r, cr.getBinary().toStringUsingUTF8()); cr.consume(); }
+                            } else {
+                                for (int r = 0; r < fRows; r++) cr.consume();
                             }
-                        } else {
-                            switch (colPtn[pi]) {
-                                case INT32  -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeInt(ini, startRow + r, cr.getInteger()); cr.consume(); } }
-                                case INT64  -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeInt(ini, startRow + r, (int) cr.getLong()); cr.consume(); } }
-                                case DOUBLE -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeInt(ini, startRow + r, (int) cr.getDouble()); cr.consume(); } }
-                                default     -> { for (int r = 0; r < groupRows; r++) cr.consume(); }
-                            }
                         }
-                    } else if (lng >= 0) {
-                        switch (colPtn[pi]) {
-                            case INT64  -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeLong(lng, startRow + r, cr.getLong()); cr.consume(); } }
-                            case INT32  -> { for (int r = 0; r < groupRows; r++) { if (cr.getCurrentDefinitionLevel() >= maxDef) table.writeLong(lng, startRow + r, (long) cr.getInteger()); cr.consume(); } }
-                            default     -> { for (int r = 0; r < groupRows; r++) cr.consume(); }
-                        }
-                    } else if (str >= 0) {
-                        for (int r = 0; r < groupRows; r++) {
-                            if (cr.getCurrentDefinitionLevel() >= maxDef)
-                                table.writeString(str, startRow + r, cr.getBinary().toStringUsingUTF8());
-                            cr.consume();
-                        }
-                    } else {
-                        for (int r = 0; r < groupRows; r++) cr.consume();
-                    }
-                }
+                }));
             }
+
+            pool.shutdown();
+            if (!pool.awaitTermination(30, TimeUnit.MINUTES))
+                throw new IOException("Timeout décodage Parquet");
+            for (Future<?> f : futures)
+                try { f.get(); } catch (Exception e) { throw new IOException("Erreur décodage", e); }
 
             table.trimRowCount(totalAllocated);
             return totalAllocated;

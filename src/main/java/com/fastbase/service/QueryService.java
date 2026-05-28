@@ -118,7 +118,7 @@ public class QueryService {
         int n = table.getRowCount();
         Condition cond = parseCondition(whereCondition, table);
 
-        if (n > 500_000) {
+        if (n > 100_000) {
             return IntStream.range(0, n).parallel()
                     .filter(r -> cond == null || cond.matches(r, table))
                     .mapToObj(r -> buildMap(r, colIndices, names, table))
