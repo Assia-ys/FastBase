@@ -126,3 +126,29 @@ applyGroupBy(table, null, ...); // for (int i = 0; i < rowCount; i++)
 | 4 000 000 | 2819 | 170 | 276 | 270 | 55 |
 | 10 000 000 | 8594 | 87 | 71 | 66 | 108 |
 | 20 000 000 | 19209 | 177 | 288 | 249 | 206 |
+| 30 000 000 | 33776 | 245 | 453 | 318 | 371 |
+| 40 000 000 | 46095 | 452 | 454 | 654 | 276 |
+| 50 000 000 | 58897 | 496 | 1751 | 715 | 388 |
+| 60 000 000 | 72214 | 586 | 891 | 795 | 423 |
+| 70 000 000 | 87311 | 699 | 882 | 813 | 563 |
+| 70 560 406 | 90296 | 944 | 930 | 1034 | 554 |
+
+---
+
+## Résumé final
+
+- **Lignes chargées** : 70 560 406
+- **Heap max JVM**    : 14336 MB
+
+### Résultats des requêtes (données complètes)
+
+| Requête | Description | Groupes | Temps |
+|---------|-------------|--------:|------:|
+| R1 | GROUP BY payment_type | 6 | 944 ms |
+| R2 | GROUP BY passenger_count WHERE pc>0 AND dist>0 | 11 | 930 ms |
+| R3 | GROUP BY DOLocationID WHERE tip>0 | 261 | 1034 ms |
+| R4 | GROUP BY payment_type SUM | 6 | 554 ms |
+
+---
+
+*Généré automatiquement par FastBase BenchmarkDemo*
