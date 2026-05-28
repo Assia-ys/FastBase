@@ -262,6 +262,9 @@ public class DataLoaderService {
                                 for (int r = 0; r < fRows; r++) cr.consume();
                             }
                         }
+                    } finally {
+                        semaphore.release(); // toujours libéré, même si exception
+                    }
                 }));
             }
 

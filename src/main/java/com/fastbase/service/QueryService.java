@@ -401,8 +401,8 @@ public class QueryService {
         // DESC → on garde les plus grandes valeurs → racine = plus petite (min-heap normal)
         // ASC  → on garde les plus petites valeurs → racine = plus grande (max-heap = min-heap inversé)
         Comparator<Integer> heapComp = numeric
-            ? (a, b) -> { double c = table.getNumericRaw(colIdx, a) - table.getNumericRaw(colIdx, b);
-                          return desc ? (c < 0 ? -1 : c > 0 ? 1 : 0) : (c < 0 ? 1 : c > 0 ? -1 : 0); }
+            ? (a, b) -> { int c = Double.compare(table.getNumericRaw(colIdx, a), table.getNumericRaw(colIdx, b));
+                          return desc ? c : -c; }
             : (a, b) -> { int c = compareValues(table.getValue(a, colIdx), table.getValue(b, colIdx));
                           return desc ? c : -c; };
 
