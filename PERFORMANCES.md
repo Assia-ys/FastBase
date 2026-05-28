@@ -203,3 +203,10 @@ Scaling LOAD et GROUP BY quasi-linéaire. SELECT non-linéaire au-delà de 70M (
 | 4 colonnes synthétiques | `-Xmx12g` | 100M+ | Limite `int` (~2,1G) |
 | 19 colonnes NYC Taxi | `-Xmx12g` | ~70M | 10,6 GB données à 70M |
 | 19 colonnes NYC Taxi | `-Xmx14g` | ~90M | OS + JVM prennent ~2 GB |
+
+1. Le GC est inévitable ici
+   Avec le chargement incrémental, la table grossit à chaque palier et n'est jamais libérée. À 8M lignes en mémoire, le GC G1 fait une pause
+   complète pour compacter le heap — tu ne peux pas l'empêcher, juste le déplacer dans le temps.
+
+2. Pour un projet pédagogique, c'est acceptable
+   L'anomalie est explicable et le reste de la courbe est propre. Elle ne remet pas en cause les résultats.

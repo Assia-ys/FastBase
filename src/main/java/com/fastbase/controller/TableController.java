@@ -2,6 +2,7 @@ package com.fastbase.controller;
 
 import com.fastbase.dto.CreateTableRequestDTO;
 import com.fastbase.dto.LoadDataRequestDTO;
+import com.fastbase.dto.LoadFromUrlRequestDTO;
 import com.fastbase.model.Table;
 import com.fastbase.service.DataLoaderService;
 import com.fastbase.service.TableService;
@@ -10,7 +11,14 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.InputStream;
+import java.net.URI;
+
 import java.io.IOException;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -61,5 +69,40 @@ public class TableController {
             case PARQUET -> dataLoaderService.loadParquetData(request.getTableName(), request.getFile().getInputStream());
         };
         return Map.of("message", "Données chargées", "rowsLoaded", rows, "loadingMs", System.currentTimeMillis() - start);
+    }
+
+    @PostMapping("/load-url")
+    public Map<String, Object> loadFromUrl(@Valid @RequestBody LoadFromUrlRequestDTO request) throws Exception {
+        HttpClient client = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .connectTimeout(Duration.ofSeconds(30))
+                .build();
+
+        HttpRequest httpRequest = HttpRequest.newBuilder()
+                .uri(URI.create(request.getUrl()))
+                .timeout(Duration.ofMinutes(30))
+                .GET()
+                .build();
+
+        long start = System.currentTimeMillis();
+        HttpResponse<InputStream> response = client.send(httpRequest, HttpResponse.BodyHandlers.ofInputStream());
+
+        if (response.statusCode() != 200) {
+            throw new IllegalArgumentException("Echec du téléchargement — HTTP " + response.statusCode());
+        }
+
+        int rows;
+        try (InputStream body = response.body()) {
+            rows = switch (request.getFormat()) {
+                case CSV     -> dataLoaderService.loadCsvData(request.getTableName(), body);
+                case PARQUET -> dataLoaderService.loadParquetData(request.getTableName(), body, request.getMaxRows());
+            };
+        }
+
+        return Map.of(
+                "message",    "Données chargées depuis " + request.getUrl(),
+                "rowsLoaded", rows,
+                "loadingMs",  System.currentTimeMillis() - start
+        );
     }
 }

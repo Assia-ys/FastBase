@@ -6,20 +6,23 @@ import com.fastbase.model.Table;
 import com.fastbase.model.enums.ColumnType;
 import com.fastbase.storage.DataStorage;
 import jakarta.validation.constraints.NotBlank;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.Path;
+import org.apache.parquet.column.page.PageReadStore;
 import org.apache.parquet.example.data.Group;
+import org.apache.parquet.example.data.simple.convert.GroupRecordConverter;
 import org.apache.parquet.hadoop.ParquetFileReader;
-import org.apache.parquet.hadoop.ParquetReader;
-import org.apache.parquet.hadoop.example.GroupReadSupport;
-import org.apache.parquet.hadoop.util.HadoopInputFile;
+import org.apache.parquet.io.ColumnIOFactory;
 import org.apache.parquet.io.InputFile;
-import org.apache.parquet.hadoop.metadata.ParquetMetadata;
+import org.apache.parquet.io.MessageColumnIO;
+import org.apache.parquet.io.RecordReader;
+import org.apache.parquet.io.SeekableInputStream;
+import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.Type;
+import java.nio.file.Paths;
 import org.springframework.stereotype.Service;
 import org.springframework.validation.annotation.Validated;
 
 import java.io.*;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.LocalDateTime;
@@ -112,6 +115,7 @@ public class DataLoaderService {
         }
         totalRows += batchFilled; // lignes du dernier batch partiel (déjà allouées)
 
+        table.trimRowCount(totalRows); // corrige rowCount si dernier batch non plein
         return totalRows;
     }
 
@@ -132,43 +136,164 @@ public class DataLoaderService {
                 .orElseThrow(() -> new TableNotFoundException(tableName));
         List<Column> columns = table.getColumns();
 
-        // Pré-allocation depuis les métadonnées Parquet (lecture instantanée des footers)
-        int cap = maxRows > 0 ? maxRows : (int) Math.min(countParquetRows(filePath), 60_000_000);
-        table.reserveCapacity(cap);
+        try (ParquetFileReader fileReader = ParquetFileReader.open(localFile(filePath))) {
+            MessageType schema = fileReader.getFooter().getFileMetaData().getSchema();
+            long totalInFile   = fileReader.getRecordCount();
 
-        try (ParquetReader<Group> reader = ParquetReader
-                .builder(new GroupReadSupport(), new Path(filePath))
-                .withConf(new Configuration())
-                .build()) {
+            int cap = maxRows > 0 ? maxRows : (int) Math.min(totalInFile, 60_000_000);
+            table.reserveCapacity(cap);
 
-            Group  group;
-            int[]  columnMapping = null;
-            int    totalRows     = 0;
-            int    batchStart    = 0;
-            int    batchFilled   = 0;
+            MessageColumnIO columnIO    = new ColumnIOFactory().getColumnIO(schema);
+            int[]           columnMapping = null;
+            int             totalRows   = 0;
 
-            while ((group = reader.read()) != null) {
+            PageReadStore pages;
+            outer:
+            while ((pages = fileReader.readNextRowGroup()) != null) {
+                RecordReader<Group> recordReader =
+                        columnIO.getRecordReader(pages, new GroupRecordConverter(schema));
+                long groupSize = pages.getRowCount();
+
+                int batchStart  = 0;
+                int batchFilled = 0;
+
+                for (long i = 0; i < groupSize; i++) {
+                    if (maxRows > 0 && totalRows + batchFilled >= maxRows) break outer;
+
+                    Group group = recordReader.read();
+
+                    if (columnMapping == null)
+                        columnMapping = buildParquetColumnMapping(group, columns);
+
+                    if (batchFilled == 0) {
+                        int allocCount = maxRows > 0
+                                ? Math.min(BATCH_SIZE, maxRows - totalRows)
+                                : BATCH_SIZE;
+                        batchStart = table.allocateBatch(allocCount);
+                    }
+
+                    writeParquetRow(group, batchStart + batchFilled, columnMapping, columns, table);
+                    batchFilled++;
+
+                    if (batchFilled >= BATCH_SIZE) {
+                        totalRows  += batchFilled;
+                        batchFilled = 0;
+                    }
+                }
+                totalRows += batchFilled;
+            }
+
+            table.trimRowCount(totalRows);
+            return totalRows;
+        }
+    }
+
+    /** Chargement incrémental : saute skipRows lignes puis charge maxRows lignes supplémentaires. */
+    public int loadParquetData(
+            @NotBlank String tableName,
+            @NotBlank String filePath,
+            int skipRows,
+            int maxRows) throws IOException {
+        if (skipRows <= 0) return loadParquetData(tableName, filePath, maxRows);
+
+        Table table = dataStorage.getTable(tableName)
+                .orElseThrow(() -> new TableNotFoundException(tableName));
+        List<Column> columns  = table.getColumns();
+        int existingRows      = table.getRowCount();
+
+        try (ParquetFileReader fileReader = ParquetFileReader.open(localFile(filePath))) {
+            MessageType schema = fileReader.getFooter().getFileMetaData().getSchema();
+
+            // Saute les row-groups entièrement compris dans skipRows (O(1) par groupe)
+            long rowsSkipped = 0;
+            for (org.apache.parquet.hadoop.metadata.BlockMetaData block
+                    : fileReader.getFooter().getBlocks()) {
+                if (rowsSkipped + block.getRowCount() <= skipRows) {
+                    fileReader.readNextRowGroup();
+                    rowsSkipped += block.getRowCount();
+                } else break;
+            }
+            long inGroupSkip = skipRows - rowsSkipped;
+
+            MessageColumnIO columnIO    = new ColumnIOFactory().getColumnIO(schema);
+            int[]           colMapping  = null;
+            int             totalRows   = 0;
+            boolean         firstGroup  = true;
+
+            PageReadStore pages;
+            outer:
+            while ((pages = fileReader.readNextRowGroup()) != null) {
+                RecordReader<Group> rr = columnIO.getRecordReader(pages, new GroupRecordConverter(schema));
+                long groupSize  = pages.getRowCount();
+                long rowStart   = firstGroup ? inGroupSkip : 0;
+                firstGroup = false;
+
+                for (long j = 0; j < rowStart; j++) rr.read(); // lignes à ignorer dans le groupe partiel
+
+                int batchStart = 0, batchFilled = 0;
+                for (long i = rowStart; i < groupSize; i++) {
+                    if (maxRows > 0 && totalRows + batchFilled >= maxRows) break outer;
+
+                    Group group = rr.read();
+                    if (colMapping == null) colMapping = buildParquetColumnMapping(group, columns);
+
+                    if (batchFilled == 0) {
+                        int allocCount = maxRows > 0
+                                ? Math.min(BATCH_SIZE, maxRows - totalRows) : BATCH_SIZE;
+                        batchStart = table.allocateBatch(allocCount);
+                    }
+                    writeParquetRow(group, batchStart + batchFilled, colMapping, columns, table);
+                    batchFilled++;
+                    if (batchFilled >= BATCH_SIZE) { totalRows += batchFilled; batchFilled = 0; }
+                }
+                totalRows += batchFilled;
+            }
+            table.trimRowCount(existingRows + totalRows);
+            return totalRows;
+        }
+    }
+
+    /** Chargement incrémental CSV : saute skipRows lignes de données puis charge maxRows. */
+    public int loadCsvData(
+            @NotBlank String tableName,
+            @NotBlank String filePath,
+            int skipRows,
+            int maxRows) throws IOException {
+        if (skipRows <= 0) return loadCsvData(tableName, filePath, maxRows);
+
+        try (BufferedReader reader = new BufferedReader(new FileReader(filePath), BUFFER_SIZE)) {
+            Table table = dataStorage.getTable(tableName)
+                    .orElseThrow(() -> new TableNotFoundException(tableName));
+            List<Column> columns = table.getColumns();
+            int existingRows = table.getRowCount();
+
+            String headerLine = reader.readLine();
+            if (headerLine == null) throw new IOException("Fichier CSV vide");
+            String[] csvHeaders = parseCsvLine(headerLine);
+            int[] columnMapping = buildColumnMapping(csvHeaders, columns);
+
+            for (int s = 0; s < skipRows; s++) if (reader.readLine() == null) return 0;
+
+            if (maxRows > 0) table.reserveCapacity(existingRows + maxRows);
+
+            int totalRows = 0, batchStart = 0, batchFilled = 0;
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isBlank()) continue;
                 if (maxRows > 0 && totalRows >= maxRows) break;
-
-                if (columnMapping == null)
-                    columnMapping = buildParquetColumnMapping(group, columns);
-
                 if (batchFilled == 0) {
-                    int allocCount = (maxRows > 0)
-                            ? Math.min(BATCH_SIZE, maxRows - totalRows)
-                            : BATCH_SIZE;
+                    int allocCount = maxRows > 0
+                            ? Math.min(BATCH_SIZE, maxRows - totalRows) : BATCH_SIZE;
                     batchStart = table.allocateBatch(allocCount);
                 }
-
-                writeParquetRow(group, batchStart + batchFilled, columnMapping, columns, table);
+                writeCsvRow(line, batchStart + batchFilled, columnMapping, columns, table);
                 batchFilled++;
-
                 if (batchFilled >= BATCH_SIZE || (maxRows > 0 && totalRows + batchFilled >= maxRows)) {
-                    totalRows  += batchFilled;
-                    batchFilled = 0;
+                    totalRows += batchFilled; batchFilled = 0;
                 }
             }
             totalRows += batchFilled;
+            table.trimRowCount(existingRows + totalRows);
             return totalRows;
         }
     }
@@ -176,25 +301,64 @@ public class DataLoaderService {
     public int loadParquetData(
             @NotBlank String tableName,
             InputStream inputStream) throws IOException {
+        return loadParquetData(tableName, inputStream, 0);
+    }
+
+    public int loadParquetData(
+            @NotBlank String tableName,
+            InputStream inputStream,
+            int maxRows) throws IOException {
 
         java.nio.file.Path tempFile = Files.createTempFile("fastbase-upload-", ".parquet");
+        tempFile.toFile().deleteOnExit(); // fallback si suppression immédiate échoue (Windows)
         try (inputStream) {
             Files.copy(inputStream, tempFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             try {
                 long rowCount = countParquetRows(tempFile.toString());
-                dataStorage.getTable(tableName)
-                        .ifPresent(t -> t.reserveCapacity((int) Math.min(rowCount, 60_000_000)));
+                int cap = maxRows > 0 ? maxRows : (int) Math.min(rowCount, 60_000_000);
+                dataStorage.getTable(tableName).ifPresent(t -> t.reserveCapacity(cap));
             } catch (Exception ignored) {}
-            return loadParquetData(tableName, tempFile.toString(), 0);
+            return loadParquetData(tableName, tempFile.toString(), maxRows);
         } finally {
-            Files.deleteIfExists(tempFile);
+            try { Files.deleteIfExists(tempFile); } catch (Exception ignored) {}
         }
     }
 
     public long countParquetRows(@NotBlank String filePath) throws IOException {
-        InputFile inputFile = HadoopInputFile.fromPath(new Path(filePath), new Configuration());
-        ParquetMetadata metadata = ParquetFileReader.open(inputFile).getFooter();
-        return metadata.getBlocks().stream().mapToLong(block -> block.getRowCount()).sum();
+        try (ParquetFileReader reader = ParquetFileReader.open(localFile(filePath))) {
+            return reader.getFooter().getBlocks().stream().mapToLong(b -> b.getRowCount()).sum();
+        }
+    }
+
+    private static InputFile localFile(String path) {
+        return new InputFile() {
+            @Override public long getLength() throws IOException {
+                return Files.size(java.nio.file.Paths.get(path));
+            }
+            @Override public SeekableInputStream newStream() throws IOException {
+                RandomAccessFile raf = new RandomAccessFile(path, "r");
+                return new SeekableInputStream() {
+                    @Override public long getPos()  throws IOException { return raf.getFilePointer(); }
+                    @Override public void seek(long p) throws IOException { raf.seek(p); }
+                    @Override public void readFully(byte[] b) throws IOException { raf.readFully(b); }
+                    @Override public void readFully(byte[] b, int s, int l) throws IOException { raf.readFully(b, s, l); }
+                    @Override public int read(ByteBuffer buf) throws IOException {
+                        byte[] tmp = new byte[buf.remaining()];
+                        int n = raf.read(tmp);
+                        if (n > 0) buf.put(tmp, 0, n);
+                        return n;
+                    }
+                    @Override public void readFully(ByteBuffer buf) throws IOException {
+                        byte[] tmp = new byte[buf.remaining()];
+                        raf.readFully(tmp);
+                        buf.put(tmp);
+                    }
+                    @Override public int read() throws IOException { return raf.read(); }
+                    @Override public int read(byte[] b, int off, int len) throws IOException { return raf.read(b, off, len); }
+                    @Override public void close() throws IOException { raf.close(); }
+                };
+            }
+        };
     }
 
     // ── Écriture directe colonnaire ────────────────────────────────

@@ -56,6 +56,29 @@ public class BenchmarkService {
         }
     }
 
+    /** Chargement incrémental : rowCount retourné = skipRows + lignes ajoutées = total table. */
+    public BenchmarkResult benchmarkCsvLoad(String tableName, String filePath, int skipRows, int maxRows) {
+        try {
+            long t0      = System.nanoTime();
+            int added    = dataLoaderService.loadCsvData(tableName, filePath, skipRows, maxRows);
+            long elapsed = System.nanoTime() - t0;
+            return new BenchmarkResult("LOAD", skipRows + added, elapsed / 1_000_000, elapsed);
+        } catch (IOException e) {
+            throw new RuntimeException("Erreur benchmark LOAD : " + e.getMessage(), e);
+        }
+    }
+
+    public BenchmarkResult benchmarkParquetLoad(String tableName, String filePath, int skipRows, int maxRows) {
+        try {
+            long t0      = System.nanoTime();
+            int added    = dataLoaderService.loadParquetData(tableName, filePath, skipRows, maxRows);
+            long elapsed = System.nanoTime() - t0;
+            return new BenchmarkResult("LOAD_PARQUET", skipRows + added, elapsed / 1_000_000, elapsed);
+        } catch (IOException e) {
+            throw new RuntimeException("Erreur benchmark LOAD PARQUET : " + e.getMessage(), e);
+        }
+    }
+
     public BenchmarkResult benchmarkLoad(Table table, List<com.fastbase.model.Row> rows) {
         long t0      = System.nanoTime();
         table.addRows(rows);

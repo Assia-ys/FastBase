@@ -140,6 +140,11 @@ public class Table {
         return start;
     }
 
+    /** Corrige rowCount après un chargement partiel (dernier batch non complètement rempli). */
+    public synchronized void trimRowCount(int actual) {
+        if (actual >= 0 && actual < rowCount) rowCount = actual;
+    }
+
     // ── Rétro-compatibilité (tests avec Row legacy) ───────────────
     /**
      * Insère un batch de Row legacy (BenchmarkServiceTest, etc.).
