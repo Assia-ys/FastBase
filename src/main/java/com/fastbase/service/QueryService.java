@@ -50,11 +50,9 @@ public class QueryService {
         List<Map<String, Object>> results;
 
         if (groupByCols != null && !groupByCols.isEmpty()) {
-            // Si pas de WHERE : passe null pour éviter l'allocation de int[rowCount] = 200 MB sur 50M lignes
-            int[] rows = (whereCondition == null || whereCondition.isBlank())
-                    ? null
-                    : applyWhere(table, whereCondition);
-            results = applyGroupBy(table, rows, selectCols, groupByCols);
+            // P14 : passe unique filter+group — évite int[rowCount] = 280 MB sur 70M lignes
+            // et étend P12 (parallèle) aux requêtes avec WHERE
+            results = applyGroupBy(table, whereCondition, selectCols, groupByCols);
             if (orderBy != null && !orderBy.isBlank())
                 applyOrderByMaps(results, orderBy, orderDir);
             if (limit != null && limit > 0 && results.size() > limit)
@@ -169,8 +167,13 @@ public class QueryService {
 
     // ── GROUP BY ──────────────────────────────────────────────────
 
+    /**
+     * P14 + P12 : GROUP BY avec filtre inline et parallélisme sur toutes les tailles.
+     * Avant : applyWhere() créait int[70M] = 280 MB, puis applyGroupBy séquentiel.
+     * Après : une seule passe parallèle — le filtre s'applique inline dans chaque thread.
+     */
     private List<Map<String, Object>> applyGroupBy(
-            Table table, int[] rows, List<String> selectCols, List<String> groupByCols) {
+            Table table, String whereCondition, List<String> selectCols, List<String> groupByCols) {
 
         int[] groupIdx = new int[groupByCols.size()];
         for (int i = 0; i < groupByCols.size(); i++) {
@@ -200,33 +203,30 @@ public class QueryService {
         int s = 0;
         for (int i = 0; i < aggs.size(); i++) slot[i] = aggs.get(i).type().equals("COUNT") ? -1 : s++;
 
-        // Optimisation clé de groupe :
-        // - 1 colonne numérique → Long key (bits du double), ZÉRO allocation par ligne sur 50M lignes
-        // - sinon → String key (quelques milliers de groupes au plus)
-        boolean numericKey = groupIdx.length == 1 && table.isNumericColumn(groupIdx[0]);
-
-        // rows == null signifie "toutes les lignes" (pas de WHERE → évite int[50M] = 200 MB)
-        int rowCount  = rows != null ? rows.length : table.getRowCount();
+        // Filtre parsé une seule fois pour tous les threads
+        Condition cond     = parseCondition(whereCondition, table);
+        boolean   numericKey = groupIdx.length == 1 && table.isNumericColumn(groupIdx[0]);
+        int       rowCount   = table.getRowCount();
 
         if (numericKey) {
-            // P12 : GROUP BY parallèle si pas de WHERE et volume > 500k
-            // Chaque CPU accumule dans son propre HashMap → zéro contention → merge trivial (peu de groupes)
-            if (rows == null && rowCount > 500_000) {
-                int nCpu   = Runtime.getRuntime().availableProcessors();
-                int chunk  = (rowCount + nCpu - 1) / nCpu;
+            if (rowCount > 500_000) {
+                // P12 + P14 : parallel, inline filter (fonctionne avec ET sans WHERE)
+                int nCpu  = Runtime.getRuntime().availableProcessors();
+                int chunk = (rowCount + nCpu - 1) / nCpu;
                 @SuppressWarnings("unchecked")
                 Map<Long, GroupAcc>[] locals = new HashMap[nCpu];
                 for (int t = 0; t < nCpu; t++) locals[t] = new HashMap<>();
 
-                final int[]        gIdx    = groupIdx;
+                final int[]         gIdx    = groupIdx;
                 final List<AggInfo> aggList = aggs;
-                final int[]        slotArr = slot;
-                final int          nacc    = nAcc;
+                final int[]         slotArr = slot;
+                final int           nacc    = nAcc;
 
                 IntStream.range(0, nCpu).parallel().forEach(t -> {
-                    int from  = t * chunk, to = Math.min(from + chunk, rowCount);
+                    int from = t * chunk, to = Math.min(from + chunk, rowCount);
                     Map<Long, GroupAcc> local = locals[t];
                     for (int r = from; r < to; r++) {
+                        if (cond != null && !cond.matches(r, table)) continue;
                         long key = Double.doubleToRawLongBits(table.getNumericRaw(gIdx[0], r));
                         GroupAcc acc = local.get(key);
                         if (acc == null) {
@@ -247,7 +247,6 @@ public class QueryService {
                     }
                 });
 
-                // Merge : peu de groupes distincts (ex: VendorID=2, payment_type=5) → trivial
                 Map<Long, GroupAcc> merged = locals[0];
                 for (int t = 1; t < nCpu; t++) {
                     for (Map.Entry<Long, GroupAcc> e : locals[t].entrySet()) {
@@ -262,35 +261,17 @@ public class QueryService {
                         }
                     }
                 }
-                // Construction résultats
-                List<Map<String, Object>> parResults = new ArrayList<>(merged.size());
-                for (GroupAcc acc : merged.values()) {
-                    Map<String, Object> result = new HashMap<>();
-                    result.put(groupByCols.get(0), acc.groupVals[0]);
-                    for (int j = 0; j < aggs.size(); j++) {
-                        AggInfo ai = aggs.get(j); int si = slot[j];
-                        switch (ai.type()) {
-                            case "COUNT" -> result.put(ai.col(), acc.count);
-                            case "SUM"   -> result.put(ai.col(), acc.hasVal[si] ? acc.sums[si] : 0.0);
-                            case "AVG"   -> result.put(ai.col(), acc.count > 0 ? acc.sums[si]/acc.count : 0.0);
-                            case "MIN"   -> result.put(ai.col(), acc.hasVal[si] ? acc.mins[si] : null);
-                            case "MAX"   -> result.put(ai.col(), acc.hasVal[si] ? acc.maxs[si] : null);
-                        }
-                    }
-                    parResults.add(result);
-                }
-                return parResults;
+                return buildNumericResults(merged, groupByCols, aggs, slot);
             }
 
-            // Chemin chaud GROUP BY colonne numérique : Long key, aucune String créée
+            // Séquentiel pour petites tables
             Map<Long, GroupAcc> groups = new HashMap<>();
-            for (int i = 0; i < rowCount; i++) {
-                int r = rows != null ? rows[i] : i;
+            for (int r = 0; r < rowCount; r++) {
+                if (cond != null && !cond.matches(r, table)) continue;
                 long key = Double.doubleToRawLongBits(table.getNumericRaw(groupIdx[0], r));
                 GroupAcc acc = groups.get(key);
                 if (acc == null) {
-                    Object[] gv = new Object[]{ table.getValue(r, groupIdx[0]) };
-                    acc = new GroupAcc(gv, nAcc);
+                    acc = new GroupAcc(new Object[]{ table.getValue(r, groupIdx[0]) }, nAcc);
                     groups.put(key, acc);
                 }
                 acc.count++;
@@ -305,30 +286,13 @@ public class QueryService {
                     }
                 }
             }
-            // Construction des résultats depuis les accumulateurs (clé numérique)
-            List<Map<String, Object>> numResults = new ArrayList<>(groups.size());
-            for (GroupAcc acc : groups.values()) {
-                Map<String, Object> result = new HashMap<>();
-                result.put(groupByCols.get(0), acc.groupVals[0]);
-                for (int j = 0; j < aggs.size(); j++) {
-                    AggInfo ai = aggs.get(j); int si = slot[j];
-                    switch (ai.type()) {
-                        case "COUNT" -> result.put(ai.col(), acc.count);
-                        case "SUM"   -> result.put(ai.col(), acc.hasVal[si] ? acc.sums[si] : 0.0);
-                        case "AVG"   -> result.put(ai.col(), acc.count > 0 ? acc.sums[si]/acc.count : 0.0);
-                        case "MIN"   -> result.put(ai.col(), acc.hasVal[si] ? acc.mins[si] : null);
-                        case "MAX"   -> result.put(ai.col(), acc.hasVal[si] ? acc.maxs[si] : null);
-                    }
-                }
-                numResults.add(result);
-            }
-            return numResults;
+            return buildNumericResults(groups, groupByCols, aggs, slot);
         }
 
-        // Chemin général : String key (GROUP BY sur colonne texte ou multi-colonnes)
+        // Chemin général : String key (GROUP BY texte ou multi-colonnes)
         Map<String, GroupAcc> groups = new HashMap<>();
-        for (int i = 0; i < rowCount; i++) {
-            int r = rows != null ? rows[i] : i;
+        for (int r = 0; r < rowCount; r++) {
+            if (cond != null && !cond.matches(r, table)) continue;
             String key = buildGroupKey(r, table, groupIdx);
             GroupAcc acc = groups.get(key);
             if (acc == null) {
@@ -340,9 +304,8 @@ public class QueryService {
             acc.count++;
             for (int j = 0; j < aggs.size(); j++) {
                 if (slot[j] < 0) continue;
-                Object v = table.getValue(r, aggs.get(j).colIdx());
-                if (v instanceof Number n2) {
-                    double d = n2.doubleValue();
+                double d = table.getNumericRaw(aggs.get(j).colIdx(), r);
+                if (!Double.isNaN(d)) {
                     acc.sums[slot[j]] += d;
                     if (d < acc.mins[slot[j]]) acc.mins[slot[j]] = d;
                     if (d > acc.maxs[slot[j]]) acc.maxs[slot[j]] = d;
@@ -350,25 +313,44 @@ public class QueryService {
                 }
             }
         }
-
         List<Map<String, Object>> results = new ArrayList<>(groups.size());
         for (GroupAcc acc : groups.values()) {
             Map<String, Object> result = new HashMap<>();
             for (int i = 0; i < groupByCols.size(); i++) result.put(groupByCols.get(i), acc.groupVals[i]);
-            for (int i = 0; i < aggs.size(); i++) {
-                AggInfo ai = aggs.get(i); int si = slot[i];
-                switch (ai.type()) {
-                    case "COUNT" -> result.put(ai.col(), acc.count);
-                    case "SUM"   -> result.put(ai.col(), acc.hasVal[si] ? acc.sums[si] : 0.0);
-                    case "AVG"   -> result.put(ai.col(), acc.count > 0 ? acc.sums[si] / acc.count : 0.0);
-                    case "MIN"   -> result.put(ai.col(), acc.hasVal[si] ? acc.mins[si] : null);
-                    case "MAX"   -> result.put(ai.col(), acc.hasVal[si] ? acc.maxs[si] : null);
-                }
-            }
+            addAggResults(result, acc, aggs, slot);
             results.add(result);
         }
         return results;
     }
+
+    private List<Map<String, Object>> buildNumericResults(
+            Map<Long, GroupAcc> groups, List<String> groupByCols,
+            List<AggInfo> aggs, int[] slot) {
+        List<Map<String, Object>> results = new ArrayList<>(groups.size());
+        for (GroupAcc acc : groups.values()) {
+            Map<String, Object> result = new HashMap<>();
+            result.put(groupByCols.get(0), acc.groupVals[0]);
+            addAggResults(result, acc, aggs, slot);
+            results.add(result);
+        }
+        return results;
+    }
+
+    private void addAggResults(Map<String, Object> result, GroupAcc acc,
+                               List<AggInfo> aggs, int[] slot) {
+        for (int i = 0; i < aggs.size(); i++) {
+            AggInfo ai = aggs.get(i); int si = slot[i];
+            switch (ai.type()) {
+                case "COUNT" -> result.put(ai.col(), acc.count);
+                case "SUM"   -> result.put(ai.col(), acc.hasVal[si] ? acc.sums[si] : 0.0);
+                case "AVG"   -> result.put(ai.col(), acc.count > 0 ? acc.sums[si] / acc.count : 0.0);
+                case "MIN"   -> result.put(ai.col(), acc.hasVal[si] ? acc.mins[si] : null);
+                case "MAX"   -> result.put(ai.col(), acc.hasVal[si] ? acc.maxs[si] : null);
+            }
+        }
+    }
+
+    // record AggInfo déclarée en local dans applyGroupBy → pas besoin ici
 
     private static class GroupAcc {
         final Object[] groupVals; long count = 0;
