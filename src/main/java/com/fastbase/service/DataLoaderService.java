@@ -31,6 +31,10 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Chargement CSV et Parquet avec écriture directe dans le stockage colonnaire de Table.
@@ -138,55 +142,64 @@ public class DataLoaderService {
         List<Column> columns = table.getColumns();
 
         try (ParquetFileReader fileReader = ParquetFileReader.open(localFile(filePath))) {
-            MessageType schema = fileReader.getFooter().getFileMetaData().getSchema();
-            long totalInFile   = fileReader.getRecordCount();
+            MessageType schema      = fileReader.getFooter().getFileMetaData().getSchema();
+            long        totalInFile = fileReader.getRecordCount();
+            List<Type>  parquetFields = schema.getFields();
 
-            int cap = maxRows > 0 ? maxRows : (int) Math.min(totalInFile, 60_000_000);
+            int cap = maxRows > 0 ? maxRows : (int) Math.min(totalInFile, 70_000_000);
             table.reserveCapacity(cap);
 
-            MessageColumnIO columnIO      = new ColumnIOFactory().getColumnIO(schema);
-            List<Type>      parquetFields = schema.getFields();
-            int[]           columnMapping = null;
-            int             totalRows     = 0;
+            // Mapping colonnes Parquet → colonnes Table (construit une fois depuis le schéma)
+            int[] columnMapping = buildParquetColumnMappingFromSchema(parquetFields, columns);
 
+            // P13 : décodage parallèle par row group
+            // Le fichier est lu séquentiellement (I/O, 1 thread) mais chaque row group
+            // (~1M lignes) est décodé + écrit en parallèle (CPU-bound, N threads).
+            // Chaque worker a son propre RecordReader sur son propre PageReadStore → zéro contention.
+            int nThreads = Runtime.getRuntime().availableProcessors();
+            ExecutorService pool = Executors.newFixedThreadPool(nThreads);
+            List<Future<Integer>> futures = new ArrayList<>();
+
+            int  totalAllocated = 0;
             PageReadStore pages;
-            outer:
+
             while ((pages = fileReader.readNextRowGroup()) != null) {
-                RecordReader<Group> recordReader =
-                        columnIO.getRecordReader(pages, new GroupRecordConverter(schema));
-                long groupSize = pages.getRowCount();
+                if (maxRows > 0 && totalAllocated >= maxRows) break;
 
-                int batchStart  = 0;
-                int batchFilled = 0;
+                int groupRows = (int) pages.getRowCount();
+                if (maxRows > 0) groupRows = Math.min(groupRows, maxRows - totalAllocated);
 
-                for (long i = 0; i < groupSize; i++) {
-                    if (maxRows > 0 && totalRows + batchFilled >= maxRows) break outer;
+                // Pré-alloue les lignes dans la table (synchronisé, ultra-rapide)
+                int startRow = table.allocateBatch(groupRows);
+                totalAllocated += groupRows;
 
-                    Group group = recordReader.read();
+                // Capture finale pour le lambda
+                final PageReadStore finalPages   = pages;
+                final int           finalStart   = startRow;
+                final int           finalRows    = groupRows;
+                final int[]         finalMapping = columnMapping;
 
-                    if (columnMapping == null)
-                        columnMapping = buildParquetColumnMapping(group, columns);
-
-                    if (batchFilled == 0) {
-                        int allocCount = maxRows > 0
-                                ? Math.min(BATCH_SIZE, maxRows - totalRows)
-                                : BATCH_SIZE;
-                        batchStart = table.allocateBatch(allocCount);
+                futures.add(pool.submit(() -> {
+                    // Chaque worker crée son propre ColumnIO + RecordReader (non thread-safe)
+                    MessageColumnIO     cio = new ColumnIOFactory().getColumnIO(schema);
+                    RecordReader<Group> rr  = cio.getRecordReader(finalPages, new GroupRecordConverter(schema));
+                    for (int i = 0; i < finalRows; i++) {
+                        Group g = rr.read();
+                        if (g == null) break;
+                        writeParquetRow(g, finalStart + i, finalMapping, columns, table, parquetFields);
                     }
-
-                    writeParquetRow(group, batchStart + batchFilled, columnMapping, columns, table, parquetFields);
-                    batchFilled++;
-
-                    if (batchFilled >= BATCH_SIZE) {
-                        totalRows  += batchFilled;
-                        batchFilled = 0;
-                    }
-                }
-                totalRows += batchFilled;
+                    return finalRows;
+                }));
             }
 
-            table.trimRowCount(totalRows);
-            return totalRows;
+            pool.shutdown();
+            pool.awaitTermination(10, TimeUnit.MINUTES);
+            for (Future<Integer> f : futures) {
+                try { f.get(); } catch (Exception e) { throw new IOException("Erreur décodage Parquet parallèle", e); }
+            }
+
+            table.trimRowCount(totalAllocated);
+            return totalAllocated;
         }
     }
 
@@ -483,6 +496,20 @@ public class DataLoaderService {
             String header = csvHeaders[i].trim();
             for (int j = 0; j < columns.size(); j++) {
                 if (columns.get(j).getName().equalsIgnoreCase(header)) {
+                    mapping[i] = j; break;
+                }
+            }
+        }
+        return mapping;
+    }
+
+    private int[] buildParquetColumnMappingFromSchema(List<Type> parquetFields, List<Column> columns) {
+        int[] mapping = new int[parquetFields.size()];
+        for (int i = 0; i < parquetFields.size(); i++) {
+            mapping[i] = -1;
+            String parquetName = parquetFields.get(i).getName();
+            for (int j = 0; j < columns.size(); j++) {
+                if (columns.get(j).getName().equalsIgnoreCase(parquetName)) {
                     mapping[i] = j; break;
                 }
             }
