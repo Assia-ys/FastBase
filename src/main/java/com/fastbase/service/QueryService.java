@@ -209,6 +209,79 @@ public class QueryService {
         int rowCount  = rows != null ? rows.length : table.getRowCount();
 
         if (numericKey) {
+            // P12 : GROUP BY parallèle si pas de WHERE et volume > 500k
+            // Chaque CPU accumule dans son propre HashMap → zéro contention → merge trivial (peu de groupes)
+            if (rows == null && rowCount > 500_000) {
+                int nCpu   = Runtime.getRuntime().availableProcessors();
+                int chunk  = (rowCount + nCpu - 1) / nCpu;
+                @SuppressWarnings("unchecked")
+                Map<Long, GroupAcc>[] locals = new HashMap[nCpu];
+                for (int t = 0; t < nCpu; t++) locals[t] = new HashMap<>();
+
+                final int[]        gIdx    = groupIdx;
+                final List<AggInfo> aggList = aggs;
+                final int[]        slotArr = slot;
+                final int          nacc    = nAcc;
+
+                IntStream.range(0, nCpu).parallel().forEach(t -> {
+                    int from  = t * chunk, to = Math.min(from + chunk, rowCount);
+                    Map<Long, GroupAcc> local = locals[t];
+                    for (int r = from; r < to; r++) {
+                        long key = Double.doubleToRawLongBits(table.getNumericRaw(gIdx[0], r));
+                        GroupAcc acc = local.get(key);
+                        if (acc == null) {
+                            acc = new GroupAcc(new Object[]{ table.getValue(r, gIdx[0]) }, nacc);
+                            local.put(key, acc);
+                        }
+                        acc.count++;
+                        for (int j = 0; j < aggList.size(); j++) {
+                            if (slotArr[j] < 0) continue;
+                            double d = table.getNumericRaw(aggList.get(j).colIdx(), r);
+                            if (!Double.isNaN(d)) {
+                                acc.sums[slotArr[j]] += d;
+                                if (d < acc.mins[slotArr[j]]) acc.mins[slotArr[j]] = d;
+                                if (d > acc.maxs[slotArr[j]]) acc.maxs[slotArr[j]] = d;
+                                acc.hasVal[slotArr[j]] = true;
+                            }
+                        }
+                    }
+                });
+
+                // Merge : peu de groupes distincts (ex: VendorID=2, payment_type=5) → trivial
+                Map<Long, GroupAcc> merged = locals[0];
+                for (int t = 1; t < nCpu; t++) {
+                    for (Map.Entry<Long, GroupAcc> e : locals[t].entrySet()) {
+                        GroupAcc src = e.getValue(), dst = merged.get(e.getKey());
+                        if (dst == null) { merged.put(e.getKey(), src); continue; }
+                        dst.count += src.count;
+                        for (int j = 0; j < nacc; j++) {
+                            dst.sums[j] += src.sums[j];
+                            if (src.mins[j] < dst.mins[j]) dst.mins[j] = src.mins[j];
+                            if (src.maxs[j] > dst.maxs[j]) dst.maxs[j] = src.maxs[j];
+                            if (src.hasVal[j]) dst.hasVal[j] = true;
+                        }
+                    }
+                }
+                // Construction résultats
+                List<Map<String, Object>> parResults = new ArrayList<>(merged.size());
+                for (GroupAcc acc : merged.values()) {
+                    Map<String, Object> result = new HashMap<>();
+                    result.put(groupByCols.get(0), acc.groupVals[0]);
+                    for (int j = 0; j < aggs.size(); j++) {
+                        AggInfo ai = aggs.get(j); int si = slot[j];
+                        switch (ai.type()) {
+                            case "COUNT" -> result.put(ai.col(), acc.count);
+                            case "SUM"   -> result.put(ai.col(), acc.hasVal[si] ? acc.sums[si] : 0.0);
+                            case "AVG"   -> result.put(ai.col(), acc.count > 0 ? acc.sums[si]/acc.count : 0.0);
+                            case "MIN"   -> result.put(ai.col(), acc.hasVal[si] ? acc.mins[si] : null);
+                            case "MAX"   -> result.put(ai.col(), acc.hasVal[si] ? acc.maxs[si] : null);
+                        }
+                    }
+                    parResults.add(result);
+                }
+                return parResults;
+            }
+
             // Chemin chaud GROUP BY colonne numérique : Long key, aucune String créée
             Map<Long, GroupAcc> groups = new HashMap<>();
             for (int i = 0; i < rowCount; i++) {
@@ -479,6 +552,25 @@ public class QueryService {
         }
     }
 
+    // P9 ── NumericCondition : WHERE sur colonne numérique sans boxing ─────────────
+    // getValue() crée un Integer/Float/Long à chaque appel → GC pression sur 50M lignes.
+    // getNumericRaw() retourne un double primitif directement depuis int[]/float[]/long[].
+    private static final class NumericCondition implements Condition {
+        final int colIndex; final SimpleCondition.Op op; final double threshold;
+        NumericCondition(int colIndex, SimpleCondition.Op op, double threshold) {
+            this.colIndex = colIndex; this.op = op; this.threshold = threshold;
+        }
+        @Override public boolean matches(int rowIdx, Table table) {
+            double v = table.getNumericRaw(colIndex, rowIdx);
+            return switch (op) {
+                case EQ  -> v == threshold; case NEQ -> v != threshold;
+                case LT  -> v <  threshold; case LTE -> v <= threshold;
+                case GT  -> v >  threshold; case GTE -> v >= threshold;
+                default  -> false;
+            };
+        }
+    }
+
     private static class SimpleCondition implements Condition {
         enum Op { EQ, NEQ, LT, LTE, GT, GTE, LIKE }
 
@@ -511,7 +603,7 @@ public class QueryService {
             throw new InvalidQueryException("Condition WHERE non reconnue : " + condition);
         }
 
-        private static SimpleCondition make(String col, Op op, String val, Table table) {
+    private static Condition make(String col, Op op, String val, Table table) {
             int idx = table.getColumnIndex(col.trim());
             if (idx < 0) throw new InvalidQueryException("Colonne WHERE introuvable : " + col.trim());
             String clean = val.trim();
@@ -520,6 +612,11 @@ public class QueryService {
                 ((clean.charAt(0) == '\'' && clean.charAt(clean.length()-1) == '\'') ||
                  (clean.charAt(0) == '"'  && clean.charAt(clean.length()-1) == '"')))
                 clean = clean.substring(1, clean.length() - 1);
+            // P9 : colonne numérique → NumericCondition (getNumericRaw, zéro boxing Integer/Float)
+            if (op != Op.LIKE && table.isNumericColumn(idx)) {
+                try { return new NumericCondition(idx, op, Double.parseDouble(clean)); }
+                catch (NumberFormatException ignored) {}
+            }
             return new SimpleCondition(idx, op, clean);
         }
 
