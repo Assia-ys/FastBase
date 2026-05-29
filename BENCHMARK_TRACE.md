@@ -2,7 +2,7 @@
 
 | Paramètre | Valeur |
 |-----------|--------|
-| Date      | `2026-05-29 07:52:09` |
+| Date      | `2026-05-29 09:40:09` |
 | Fichier   | `yellow_tripdata_combined.parquet` |
 | Lignes totales | 70 560 406 |
 | Heap max JVM   | 14 336 MB |
@@ -121,17 +121,17 @@ applyGroupBy(table, null, ...); // for (int i = 0; i < rowCount; i++)
 
 ## Résultats par palier
 
-| Lignes | LOAD (ms) | R1 (ms) | R2 (ms) | R3 (ms) | R4 (ms) | R5 (ms) |
-|-------:|----------:|--------:|--------:|--------:|--------:|--------:|
-| 4 000 000 | 2581 | 150 | 182 | 520 | 22 | 44 |
-| 10 000 000 | 8709 | 230 | 269 | 598 | 82 | 131 |
-| 20 000 000 | 18181 | 370 | 472 | 732 | 177 | 370 |
-| 30 000 000 | 28115 | 580 | 738 | 953 | 513 | 642 |
-| 40 000 000 | 39384 | 897 | 1361 | 1316 | 851 | 1085 |
-| 50 000 000 | 51825 | 1473 | 1848 | 1878 | 1218 | 2012 |
-| 60 000 000 | 64644 | 1958 | 2801 | 2457 | 1663 | 2918 |
-| 70 000 000 | 77951 | 2571 | 3551 | 3390 | 2143 | 4894 |
-| 70 560 406 | 79608 | 3490 | 4420 | 4246 | 2652 | 5983 |
+| Lignes | LOAD (ms) | R1 (ms) | R2 (ms) | R3 (ms) | R4 (ms) | R5 (ms) | S1 scan (ms) | S2 filtre (ms) | S3 top-10 (ms) |
+|-------:|----------:|--------:|--------:|--------:|--------:|--------:|-------------:|---------------:|---------------:|
+| 4 000 000 | 2561 | 153 | 211 | 217 | 25 | 39 | 83 | 77 | 235 |
+| 10 000 000 | 8159 | 81 | 82 | 67 | 70 | 109 | 139 | 183 | 715 |
+| 20 000 000 | 18305 | 159 | 141 | 142 | 89 | 199 | 430 | 377 | 1075 |
+| 30 000 000 | 28126 | 278 | 206 | 202 | 136 | 274 | 512 | 573 | 1685 |
+| 40 000 000 | 38490 | 346 | 282 | 256 | 178 | 498 | 667 | 802 | 2217 |
+| 50 000 000 | 49166 | 449 | 452 | 489 | 267 | 566 | 950 | 1029 | 2878 |
+| 60 000 000 | 61687 | 484 | 651 | 666 | 395 | 828 | 1300 | 1744 | 3352 |
+| 70 000 000 | 74774 | 844 | 716 | 668 | 440 | 956 | 1401 | 1505 | 3968 |
+| 70 560 406 | 76499 | 605 | 723 | 706 | 553 | 1068 | 1232 | 1659 | 3965 |
 
 ---
 
@@ -144,31 +144,19 @@ applyGroupBy(table, null, ...); // for (int i = 0; i < rowCount; i++)
 
 | Requête | Description | Groupes | Temps |
 |---------|-------------|--------:|------:|
-| R1 | GROUP BY payment_type | 6 | 919 ms |
-| R2 | GROUP BY passenger_count WHERE pc>0 AND dist>0 | 11 | 869 ms |
-| R3 | GROUP BY DOLocationID WHERE tip>0 | 261 | 856 ms |
-| R4 | GROUP BY payment_type SUM | 6 | 509 ms |
-| R5 | GROUP BY RatecodeID WHERE dist>0 AND total>0 | 8 | 1089 ms |
+| R1 | GROUP BY payment_type | 6 | 605 ms |
+| R2 | GROUP BY passenger_count WHERE pc>0 AND dist>0 | 11 | 723 ms |
+| R3 | GROUP BY DOLocationID WHERE tip>0 | 261 | 706 ms |
+| R4 | GROUP BY payment_type SUM | 6 | 553 ms |
+| R5 | GROUP BY RatecodeID WHERE dist>0 AND total>0 | 8 | 1068 ms |
 
 ---
 
-## Benchmark SELECT (dernière échelle)
+## Légende scan (colonnes S1 / S2 / S3 du tableau ci-dessus)
 
-| Lignes | S1 scan (ms) | S2 filtre (ms) | S3 top-10 (ms) | S1 lignes | S2 filtrées |
-|-------:|-------------:|---------------:|---------------:|----------:|------------:|
-| 4 000 000 | 79 | 77 | 249 | 4 000 000 | 1 016 970 |
-| 10 000 000 | 144 | 177 | 471 | 10 000 000 | 2 744 306 |
-| 20 000 000 | 268 | 418 | 913 | 20 000 000 | 6 080 492 |
-| 30 000 000 | 531 | 613 | 1438 | 30 000 000 | 9 802 219 |
-| 40 000 000 | 673 | 924 | 1935 | 40 000 000 | 13 234 449 |
-| 50 000 000 | 1240 | 1032 | 2735 | 50 000 000 | 17 108 992 |
-| 60 000 000 | 1104 | 1289 | 2986 | 60 000 000 | 20 928 781 |
-| 70 000 000 | 1522 | 1778 | 3782 | 70 000 000 | 25 065 974 |
-| 70 560 406 | 1488 | 1722 | 3930 | 70 560 406 | 25 370 005 |
-
-- **S1** : `SELECT fare_amount, trip_distance, tip_amount` — scan complet sans matérialisation (`scanSelectCount`)
+- **S1** : `SELECT fare_amount, trip_distance, tip_amount` — scan complet, sans matérialisation (`scanSelectCount`)
 - **S2** : `SELECT ... WHERE fare_amount > 10 AND tip_amount > 0` — filtre AND composé
-- **S3** : `SELECT ... ORDER BY tip_amount DESC LIMIT 10` — top-N via PriorityQueue O(n log 10)
+- **S3** : `SELECT ... ORDER BY tip_amount DESC LIMIT 10` — top-N via heap O(n log 10)
 
 ---
 
