@@ -19,6 +19,18 @@
 		<logback.version>1.5.12</logback.version>
 	</properties>
 
+	<dependencyManagement>
+		<dependencies>
+			<!-- Force hadoop-shaded-guava 1.2.0 (Guava 32) qui utilise VarHandle à la place
+			     de sun.misc.Unsafe — supprime les 4 warnings "terminally deprecated" au démarrage -->
+			<dependency>
+				<groupId>org.apache.hadoop.thirdparty</groupId>
+				<artifactId>hadoop-shaded-guava</artifactId>
+				<version>1.2.0</version>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+
 	<dependencies>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -92,7 +104,7 @@
 				<artifactId>maven-surefire-plugin</artifactId>
 				<configuration>
 					<!-- Benchmarks réels jusqu'à 4M lignes : la table est matérialisée en mémoire. -->
-					<argLine>-Xms8g -Xmx12g -XX:+UseZGC -XX:+AlwaysPreTouch</argLine>
+					<argLine>-Xms8g -Xmx12g -XX:+UseZGC -XX:+AlwaysPreTouch --sun-misc-unsafe-memory-access=allow</argLine>
 				</configuration>
 			</plugin>
 			<plugin>
@@ -108,6 +120,7 @@
 						<jvmArg>-XX:G1HeapRegionSize=16m</jvmArg>
 						<jvmArg>-XX:MaxGCPauseMillis=500</jvmArg>
 						<jvmArg>-XX:+UseCompressedOops</jvmArg>
+					<jvmArg>--sun-misc-unsafe-memory-access=allow</jvmArg>
 					</jvmArgs>
 				</configuration>
 			</plugin>

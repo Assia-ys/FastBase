@@ -4,6 +4,10 @@ target/
 !**/src/main/**/target/
 !**/src/test/**/target/
 
+### Markdown — tous les .md exclus du depot ###
+*.md
+**/CLAUDE.md
+
 ### STS ###
 .apt_generated
 .classpath
