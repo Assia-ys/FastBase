@@ -449,8 +449,9 @@ public class QueryService {
     }
 
     /**
-     * TOP-N sans WHERE — itère 0..rowCount sans créer int[rowCount] (240 MB à 60M lignes).
-     * Pour colonnes numériques : comparateur via getNumericRaw() → zéro boxing Double.
+     * TOP-N sans WHERE — zéro boxing sur colonnes numériques.
+     * Seuil (threshold) mis à jour dès que le heap est plein : on rejette ~99,99 % des lignes
+     * sans jamais créer d'Integer, éliminant la pression GC observée à grand volume.
      */
     private int[] topNRowsDirect(Table table, String orderBy, String orderDir, int limit) {
         int colIdx = table.getColumnIndex(orderBy);
@@ -462,20 +463,34 @@ public class QueryService {
         boolean desc    = "DESC".equalsIgnoreCase(orderDir);
         boolean numeric = table.isNumericColumn(colIdx);
 
-        // Min-heap de taille `limit` : la racine est le "pire" des top-N
-        // DESC → on garde les plus grandes valeurs → racine = plus petite (min-heap normal)
-        // ASC  → on garde les plus petites valeurs → racine = plus grande (max-heap = min-heap inversé)
         Comparator<Integer> heapComp = numeric
             ? (a, b) -> { int c = Double.compare(table.getNumericRaw(colIdx, a), table.getNumericRaw(colIdx, b));
                           return desc ? c : -c; }
             : (a, b) -> { int c = compareValues(table.getValue(a, colIdx), table.getValue(b, colIdx));
                           return desc ? c : -c; };
 
-        PriorityQueue<Integer> heap = new PriorityQueue<>(actual + 1, heapComp);
-        for (int r = 0; r < n; r++) {
-            heap.offer(r);
-            if (heap.size() > limit) heap.poll();
+        PriorityQueue<Integer> heap = new PriorityQueue<>(limit + 1, heapComp);
+
+        if (numeric) {
+            // Chemin optimisé : seuil primitif → la grande majorité des lignes ne boxe jamais
+            // threshold = valeur de la racine du heap (le "pire" des top-N actuels)
+            double threshold = desc ? Double.NEGATIVE_INFINITY : Double.POSITIVE_INFINITY;
+            for (int r = 0; r < n; r++) {
+                double v = table.getNumericRaw(colIdx, r);
+                // Rejette sans boxing si la valeur ne peut pas améliorer le top-N
+                if (heap.size() >= limit && (desc ? v <= threshold : v >= threshold)) continue;
+                heap.offer(r);
+                if (heap.size() > limit) heap.poll();
+                // Met à jour le seuil = valeur de la racine (pire des top-N)
+                threshold = table.getNumericRaw(colIdx, heap.peek());
+            }
+        } else {
+            for (int r = 0; r < n; r++) {
+                heap.offer(r);
+                if (heap.size() > limit) heap.poll();
+            }
         }
+
         List<Integer> result = new ArrayList<>(heap);
         result.sort(heapComp.reversed());
         return result.stream().mapToInt(Integer::intValue).toArray();

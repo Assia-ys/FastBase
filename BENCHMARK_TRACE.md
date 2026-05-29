@@ -2,7 +2,7 @@
 
 | Paramètre | Valeur |
 |-----------|--------|
-| Date      | `2026-05-29 09:29:05` |
+| Date      | `2026-05-29 09:40:09` |
 | Fichier   | `yellow_tripdata_combined.parquet` |
 | Lignes totales | 70 560 406 |
 | Heap max JVM   | 14 336 MB |
@@ -123,5 +123,41 @@ applyGroupBy(table, null, ...); // for (int i = 0; i < rowCount; i++)
 
 | Lignes | LOAD (ms) | R1 (ms) | R2 (ms) | R3 (ms) | R4 (ms) | R5 (ms) | S1 scan (ms) | S2 filtre (ms) | S3 top-10 (ms) |
 |-------:|----------:|--------:|--------:|--------:|--------:|--------:|-------------:|---------------:|---------------:|
-| 4 000 000 | 2230 | 155 | 138 | 203 | 25 | 44 | 91 | 70 | 241 |
-| 10 000 000 | 8116 | 231 | 227 | 285 | 88 | 260 | 166 | 193 | 829 |
+| 4 000 000 | 2561 | 153 | 211 | 217 | 25 | 39 | 83 | 77 | 235 |
+| 10 000 000 | 8159 | 81 | 82 | 67 | 70 | 109 | 139 | 183 | 715 |
+| 20 000 000 | 18305 | 159 | 141 | 142 | 89 | 199 | 430 | 377 | 1075 |
+| 30 000 000 | 28126 | 278 | 206 | 202 | 136 | 274 | 512 | 573 | 1685 |
+| 40 000 000 | 38490 | 346 | 282 | 256 | 178 | 498 | 667 | 802 | 2217 |
+| 50 000 000 | 49166 | 449 | 452 | 489 | 267 | 566 | 950 | 1029 | 2878 |
+| 60 000 000 | 61687 | 484 | 651 | 666 | 395 | 828 | 1300 | 1744 | 3352 |
+| 70 000 000 | 74774 | 844 | 716 | 668 | 440 | 956 | 1401 | 1505 | 3968 |
+| 70 560 406 | 76499 | 605 | 723 | 706 | 553 | 1068 | 1232 | 1659 | 3965 |
+
+---
+
+## Résumé final
+
+- **Lignes chargées** : 70 560 406
+- **Heap max JVM**    : 14336 MB
+
+### Résultats des requêtes (données complètes)
+
+| Requête | Description | Groupes | Temps |
+|---------|-------------|--------:|------:|
+| R1 | GROUP BY payment_type | 6 | 605 ms |
+| R2 | GROUP BY passenger_count WHERE pc>0 AND dist>0 | 11 | 723 ms |
+| R3 | GROUP BY DOLocationID WHERE tip>0 | 261 | 706 ms |
+| R4 | GROUP BY payment_type SUM | 6 | 553 ms |
+| R5 | GROUP BY RatecodeID WHERE dist>0 AND total>0 | 8 | 1068 ms |
+
+---
+
+## Légende scan (colonnes S1 / S2 / S3 du tableau ci-dessus)
+
+- **S1** : `SELECT fare_amount, trip_distance, tip_amount` — scan complet, sans matérialisation (`scanSelectCount`)
+- **S2** : `SELECT ... WHERE fare_amount > 10 AND tip_amount > 0` — filtre AND composé
+- **S3** : `SELECT ... ORDER BY tip_amount DESC LIMIT 10` — top-N via heap O(n log 10)
+
+---
+
+*Généré automatiquement par FastBase BenchmarkDemo*

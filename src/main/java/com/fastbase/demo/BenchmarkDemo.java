@@ -331,7 +331,6 @@ public class BenchmarkDemo {
 
             int  prevScale = 0;
             long totalLoadMs = 0;
-            long totalR1Ms = 0, totalR2Ms = 0, totalR3Ms = 0, totalR4Ms = 0, totalR5Ms = 0;
             long r1Ms = 0, r2Ms = 0, r3Ms = 0, r4Ms = 0, r5Ms = 0;
             List<Map<String, Object>> r1 = Collections.emptyList();
             List<Map<String, Object>> r2 = Collections.emptyList();
@@ -353,11 +352,11 @@ public class BenchmarkDemo {
                 boolean eof    = added < delta;
 
                 long tq;
-                tq = System.nanoTime(); r1 = query.execute(tableName, R1_COLS, null,     R1_GROUPBY, R1_ORDERBY, R1_DIR, null); r1Ms = (System.nanoTime()-tq)/1_000_000; totalR1Ms += r1Ms;
-                tq = System.nanoTime(); r2 = query.execute(tableName, R2_COLS, R2_WHERE,  R2_GROUPBY, R2_ORDERBY, R2_DIR, null); r2Ms = (System.nanoTime()-tq)/1_000_000; totalR2Ms += r2Ms;
-                tq = System.nanoTime(); r3 = query.execute(tableName, R3_COLS, R3_WHERE,  R3_GROUPBY, R3_ORDERBY, R3_DIR, null); r3Ms = (System.nanoTime()-tq)/1_000_000; totalR3Ms += r3Ms;
-                tq = System.nanoTime(); r4 = query.execute(tableName, R4_COLS, null,     R4_GROUPBY, R4_ORDERBY, R4_DIR, null); r4Ms = (System.nanoTime()-tq)/1_000_000; totalR4Ms += r4Ms;
-                tq = System.nanoTime(); r5 = query.execute(tableName, R5_COLS, R5_WHERE, R5_GROUPBY, R5_ORDERBY, R5_DIR, null); r5Ms = (System.nanoTime()-tq)/1_000_000; totalR5Ms += r5Ms;
+                tq = System.nanoTime(); r1 = query.execute(tableName, R1_COLS, null,     R1_GROUPBY, R1_ORDERBY, R1_DIR, null); r1Ms = (System.nanoTime()-tq)/1_000_000;
+                tq = System.nanoTime(); r2 = query.execute(tableName, R2_COLS, R2_WHERE,  R2_GROUPBY, R2_ORDERBY, R2_DIR, null); r2Ms = (System.nanoTime()-tq)/1_000_000;
+                tq = System.nanoTime(); r3 = query.execute(tableName, R3_COLS, R3_WHERE,  R3_GROUPBY, R3_ORDERBY, R3_DIR, null); r3Ms = (System.nanoTime()-tq)/1_000_000;
+                tq = System.nanoTime(); r4 = query.execute(tableName, R4_COLS, null,     R4_GROUPBY, R4_ORDERBY, R4_DIR, null); r4Ms = (System.nanoTime()-tq)/1_000_000;
+                tq = System.nanoTime(); r5 = query.execute(tableName, R5_COLS, R5_WHERE, R5_GROUPBY, R5_ORDERBY, R5_DIR, null); r5Ms = (System.nanoTime()-tq)/1_000_000;
 
                 // ── SELECT benchmarks ─────────────────────────────────────
                 tq = System.nanoTime(); query.scanSelectCount(tableName, S1_COLS, null);         s1Ms = (System.nanoTime()-tq)/1_000_000;
@@ -365,17 +364,17 @@ public class BenchmarkDemo {
                 tq = System.nanoTime(); s3 = query.execute(tableName, S3_COLS, null, null, S3_ORDERBY, S3_DIR, S3_LIMIT); s3Ms = (System.nanoTime()-tq)/1_000_000;
 
                 System.out.printf("  %,14d  %7d ms  %5d   %5d   %5d   %5d   %5d   │  %5d ms   %5d ms   %5d ms%s%n",
-                        actual, totalLoadMs, totalR1Ms, totalR2Ms, totalR3Ms, totalR4Ms, totalR5Ms,
+                        actual, totalLoadMs, r1Ms, r2Ms, r3Ms, r4Ms, r5Ms,
                         s1Ms, s2Ms, s3Ms,
                         eof ? "  ← FIN DU FICHIER" : "");
 
                 trace.printf("| %,d | %d | %d | %d | %d | %d | %d | %d | %d | %d |%n",
-                        actual, totalLoadMs, totalR1Ms, totalR2Ms, totalR3Ms, totalR4Ms, totalR5Ms,
+                        actual, totalLoadMs, r1Ms, r2Ms, r3Ms, r4Ms, r5Ms,
                         s1Ms, s2Ms, s3Ms);
                 trace.flush();
 
                 benchLines.add(String.format("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
-                    actual, totalLoadMs, totalR1Ms, totalR2Ms, totalR3Ms, totalR4Ms, totalR5Ms,
+                    actual, totalLoadMs, r1Ms, r2Ms, r3Ms, r4Ms, r5Ms,
                     s1Ms, s2Ms, s3Ms));
                 prevScale = actual;
                 if (eof) break;
