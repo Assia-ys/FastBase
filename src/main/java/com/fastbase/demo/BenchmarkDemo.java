@@ -22,7 +22,7 @@ import java.util.*;
  *   mvnw.cmd compile exec:java -Dexec.mainClass=com.fastbase.demo.BenchmarkDemo
  *
  * Produit dans target/demo/ :
- *   benchmark.csv           — temps LOAD + 4 requêtes par palier
+ *   benchmark.csv           — temps LOAD + 5 requêtes + SELECT par palier
  *   trace.log               — traçabilité complète (mémoire, GC, timings)
  *   requete1_resultats.csv  — résultats Requête 1 sur données complètes
  *   requete2_resultats.csv  — résultats Requête 2
@@ -112,6 +112,42 @@ public class BenchmarkDemo {
     private static final Map<String, String> R4_ALIASES = aliases(
             "payment_type",      "payment_type",
             "SUM(total_amount)", "revenu_total");
+
+    // ── Requête 5 ────────────────────────────────────────────────────────
+    private static final List<String> R5_COLS    = List.of(
+            "RatecodeID", "COUNT(*)", "AVG(fare_amount)", "AVG(tip_amount)",
+            "SUM(total_amount)", "MIN(trip_distance)", "MAX(trip_distance)");
+    private static final String       R5_WHERE   = "trip_distance > 0 AND total_amount > 0";
+    private static final List<String> R5_GROUPBY = List.of("RatecodeID");
+    private static final String       R5_ORDERBY = "SUM(total_amount)";
+    private static final String       R5_DIR     = "DESC";
+    private static final Map<String, String> R5_ALIASES = aliases(
+            "RatecodeID",         "RatecodeID",
+            "COUNT(*)",           "nb_courses",
+            "AVG(fare_amount)",   "tarif_moyen",
+            "AVG(tip_amount)",    "taux_pourboire_moyen",
+            "SUM(total_amount)",  "revenu_total",
+            "MIN(trip_distance)", "distance_min",
+            "MAX(trip_distance)", "distance_max");
+
+    // ── SELECT S1 — scan complet 3 colonnes, pas de WHERE ───────────────────
+    private static final List<String> S1_COLS = List.of("fare_amount", "trip_distance", "tip_amount");
+
+    // ── SELECT S2 — filtre WHERE composé ────────────────────────────────────
+    private static final List<String> S2_COLS  = List.of("fare_amount", "tip_amount", "total_amount");
+    private static final String       S2_WHERE = "fare_amount > 10 AND tip_amount > 0";
+
+    // ── SELECT S3 — TOP-10 ORDER BY tip_amount DESC ──────────────────────────
+    private static final List<String>        S3_COLS    = List.of("VendorID", "trip_distance", "fare_amount", "tip_amount", "total_amount");
+    private static final String              S3_ORDERBY = "tip_amount";
+    private static final String              S3_DIR     = "DESC";
+    private static final int                 S3_LIMIT   = 10;
+    private static final Map<String, String> S3_ALIASES = aliases(
+            "VendorID",      "VendorID",
+            "trip_distance", "distance",
+            "fare_amount",   "tarif",
+            "tip_amount",    "pourboire",
+            "total_amount",  "total");
 
     // ── Paliers : 1M → 2M → 4M → +2M jusqu'à la fin ─────────────────────
     private static List<Integer> buildScales(long totalRows) {
@@ -278,27 +314,34 @@ public class BenchmarkDemo {
             trace.println();
             trace.println("## Résultats par palier");
             trace.println();
-            trace.println("| Lignes | LOAD (ms) | R1 (ms) | R2 (ms) | R3 (ms) | R4 (ms) |");
-            trace.println("|-------:|----------:|--------:|--------:|--------:|--------:|");
+            trace.println("| Lignes | LOAD (ms) | R1 (ms) | R2 (ms) | R3 (ms) | R4 (ms) | R5 (ms) |");
+            trace.println("|-------:|----------:|--------:|--------:|--------:|--------:|--------:|");
 
             // ── CHARGEMENT INCRÉMENTAL + REQUÊTES ────────────────────────────
             sep('═', "CHARGEMENT + EXÉCUTION DES REQUÊTES");
-            System.out.printf("  %-14s  %-10s  %-9s  %-9s  %-9s  %-9s%n",
-                    "Lignes total", "LOAD", "R1 (ms)", "R2 (ms)", "R3 (ms)", "R4 (ms)");
-            System.out.println("  " + "─".repeat(70));
+            System.out.printf("  %-14s  %-10s  %-9s  %-9s  %-9s  %-9s  %-9s%n",
+                    "Lignes total", "LOAD", "R1 (ms)", "R2 (ms)", "R3 (ms)", "R4 (ms)", "R5 (ms)");
+            System.out.println("  " + "─".repeat(82));
 
             tables.createTable(tableName, new ArrayList<>(SCHEMA));
 
             List<String> benchLines = new ArrayList<>();
-            benchLines.add("lignes,LOAD_ms,R1_ms,R2_ms,R3_ms,R4_ms");
+            benchLines.add("lignes,LOAD_ms,R1_ms,R2_ms,R3_ms,R4_ms,R5_ms,S1_ms,S2_ms");
 
             int  prevScale = 0;
             long totalLoadMs = 0;
-            long r1Ms = 0, r2Ms = 0, r3Ms = 0, r4Ms = 0;
+            long totalR1Ms = 0, totalR2Ms = 0, totalR3Ms = 0, totalR4Ms = 0, totalR5Ms = 0;
+            long r1Ms = 0, r2Ms = 0, r3Ms = 0, r4Ms = 0, r5Ms = 0;
             List<Map<String, Object>> r1 = Collections.emptyList();
             List<Map<String, Object>> r2 = Collections.emptyList();
             List<Map<String, Object>> r3 = Collections.emptyList();
             List<Map<String, Object>> r4 = Collections.emptyList();
+            List<Map<String, Object>> r5 = Collections.emptyList();
+            List<Map<String, Object>> s3 = Collections.emptyList();
+            long s1Ms = 0, s2Ms = 0, s3Ms = 0;
+            long s1Count = 0, s2Count = 0;
+            List<String> selectConsoleLines = new ArrayList<>();
+            List<String> selectTraceLines  = new ArrayList<>();
 
             for (int scale : scales) {
                 int delta = scale - prevScale;
@@ -312,23 +355,46 @@ public class BenchmarkDemo {
                 boolean eof    = added < delta;
 
                 long tq;
-                tq = System.nanoTime(); r1 = query.execute(tableName, R1_COLS, null,     R1_GROUPBY, R1_ORDERBY, R1_DIR, null); r1Ms = (System.nanoTime()-tq)/1_000_000;
-                tq = System.nanoTime(); r2 = query.execute(tableName, R2_COLS, R2_WHERE,  R2_GROUPBY, R2_ORDERBY, R2_DIR, null); r2Ms = (System.nanoTime()-tq)/1_000_000;
-                tq = System.nanoTime(); r3 = query.execute(tableName, R3_COLS, R3_WHERE,  R3_GROUPBY, R3_ORDERBY, R3_DIR, null); r3Ms = (System.nanoTime()-tq)/1_000_000;
-                tq = System.nanoTime(); r4 = query.execute(tableName, R4_COLS, null,     R4_GROUPBY, R4_ORDERBY, R4_DIR, null); r4Ms = (System.nanoTime()-tq)/1_000_000;
+                tq = System.nanoTime(); r1 = query.execute(tableName, R1_COLS, null,     R1_GROUPBY, R1_ORDERBY, R1_DIR, null); r1Ms = (System.nanoTime()-tq)/1_000_000; totalR1Ms += r1Ms;
+                tq = System.nanoTime(); r2 = query.execute(tableName, R2_COLS, R2_WHERE,  R2_GROUPBY, R2_ORDERBY, R2_DIR, null); r2Ms = (System.nanoTime()-tq)/1_000_000; totalR2Ms += r2Ms;
+                tq = System.nanoTime(); r3 = query.execute(tableName, R3_COLS, R3_WHERE,  R3_GROUPBY, R3_ORDERBY, R3_DIR, null); r3Ms = (System.nanoTime()-tq)/1_000_000; totalR3Ms += r3Ms;
+                tq = System.nanoTime(); r4 = query.execute(tableName, R4_COLS, null,     R4_GROUPBY, R4_ORDERBY, R4_DIR, null); r4Ms = (System.nanoTime()-tq)/1_000_000; totalR4Ms += r4Ms;
+                tq = System.nanoTime(); r5 = query.execute(tableName, R5_COLS, R5_WHERE, R5_GROUPBY, R5_ORDERBY, R5_DIR, null); r5Ms = (System.nanoTime()-tq)/1_000_000; totalR5Ms += r5Ms;
 
-                System.out.printf("  %,14d  %7d ms  %6d     %6d     %6d     %6d%s%n",
-                        actual, totalLoadMs, r1Ms, r2Ms, r3Ms, r4Ms,
+                // ── SELECT benchmarks ─────────────────────────────────────
+                tq = System.nanoTime(); s1Count = query.scanSelectCount(tableName, S1_COLS, null);         s1Ms = (System.nanoTime()-tq)/1_000_000;
+                tq = System.nanoTime(); s2Count = query.scanSelectCount(tableName, S2_COLS, S2_WHERE);     s2Ms = (System.nanoTime()-tq)/1_000_000;
+                tq = System.nanoTime(); s3 = query.execute(tableName, S3_COLS, null, null, S3_ORDERBY, S3_DIR, S3_LIMIT); s3Ms = (System.nanoTime()-tq)/1_000_000;
+                selectConsoleLines.add(String.format("  %,14d  %6d ms   %7d ms   %6d ms   (%,d / %,d lignes)",
+                        actual, s1Ms, s2Ms, s3Ms, s1Count, s2Count));
+                selectTraceLines.add(String.format("| %,d | %d | %d | %d | %,d | %,d |",
+                        actual, s1Ms, s2Ms, s3Ms, s1Count, s2Count));
+
+                System.out.printf("  %,14d  %7d ms  %6d     %6d     %6d     %6d     %6d%s%n",
+                        actual, totalLoadMs, totalR1Ms, totalR2Ms, totalR3Ms, totalR4Ms, totalR5Ms,
                         eof ? "  ← FIN DU FICHIER" : "");
 
-                trace.printf("| %,d | %d | %d | %d | %d | %d |%n",
-                        actual, totalLoadMs, r1Ms, r2Ms, r3Ms, r4Ms);
+                trace.printf("| %,d | %d | %d | %d | %d | %d | %d |%n",
+                        actual, totalLoadMs, totalR1Ms, totalR2Ms, totalR3Ms, totalR4Ms, totalR5Ms);
                 trace.flush();
 
-                benchLines.add(actual + "," + totalLoadMs + "," + r1Ms + "," + r2Ms + "," + r3Ms + "," + r4Ms);
+                benchLines.add(String.format("%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                    actual, totalLoadMs, totalR1Ms, totalR2Ms, totalR3Ms, totalR4Ms, totalR5Ms, s1Ms, s2Ms));
                 prevScale = actual;
                 if (eof) break;
             }
+
+            // ── BENCHMARK SELECT (console) ────────────────────────────────
+            System.out.println();
+            sep('═', "BENCHMARK SELECT (scan / filtre / TOP-N)");
+            System.out.printf("  %-14s  %-12s  %-14s  %-14s%n",
+                    "Lignes total", "S1 scan (ms)", "S2 filtre (ms)", "S3 top-10 (ms)");
+            System.out.println("  " + "─".repeat(72));
+            for (String line : selectConsoleLines) System.out.println(line);
+            System.out.println();
+            System.out.println("  S1 : SELECT fare_amount, trip_distance, tip_amount          (scan complet, sans matérialisation)");
+            System.out.println("  S2 : SELECT ... WHERE fare_amount > 10 AND tip_amount > 0   (filtre composé AND)");
+            System.out.println("  S3 : SELECT ... ORDER BY tip_amount DESC LIMIT 10           (top-N, zéro copie hors top-10)");
 
             // ── RÉSUMÉ TRACE ──────────────────────────────────────────────
             trace.println();
@@ -346,7 +412,20 @@ public class BenchmarkDemo {
             trace.printf ("| R1 | GROUP BY payment_type | %d | %d ms |%n",       r1.size(), r1Ms);
             trace.printf ("| R2 | GROUP BY passenger_count WHERE pc>0 AND dist>0 | %d | %d ms |%n", r2.size(), r2Ms);
             trace.printf ("| R3 | GROUP BY DOLocationID WHERE tip>0 | %d | %d ms |%n",  r3.size(), r3Ms);
-            trace.printf ("| R4 | GROUP BY payment_type SUM | %d | %d ms |%n",          r4.size(), r4Ms);
+            trace.printf ("| R4 | GROUP BY payment_type SUM | %d | %d ms |%n",                                r4.size(), r4Ms);
+            trace.printf ("| R5 | GROUP BY RatecodeID WHERE dist>0 AND total>0 | %d | %d ms |%n", r5.size(), r5Ms);
+            trace.println();
+            trace.println("---");
+            trace.println();
+            trace.println("## Benchmark SELECT (dernière échelle)");
+            trace.println();
+            trace.println("| Lignes | S1 scan (ms) | S2 filtre (ms) | S3 top-10 (ms) | S1 lignes | S2 filtrées |");
+            trace.println("|-------:|-------------:|---------------:|---------------:|----------:|------------:|");
+            for (String line : selectTraceLines) { trace.println(line); }
+            trace.println();
+            trace.println("- **S1** : `SELECT fare_amount, trip_distance, tip_amount` — scan complet sans matérialisation (`scanSelectCount`)");
+            trace.println("- **S2** : `SELECT ... WHERE fare_amount > 10 AND tip_amount > 0` — filtre AND composé");
+            trace.println("- **S3** : `SELECT ... ORDER BY tip_amount DESC LIMIT 10` — top-N via PriorityQueue O(n log 10)");
             trace.println();
             trace.println("---");
             trace.println();
@@ -385,7 +464,25 @@ public class BenchmarkDemo {
                     "  GROUP BY payment_type  ORDER BY revenu_total DESC",
                     r4, R4_ALIASES, r4Ms, null);
 
+            showQuery(5,
+                    "SELECT RatecodeID, COUNT(*) AS nb_courses,\n" +
+                    "         AVG(fare_amount) AS tarif_moyen, AVG(tip_amount) AS taux_pourboire_moyen,\n" +
+                    "         SUM(total_amount) AS revenu_total,\n" +
+                    "         MIN(trip_distance) AS distance_min, MAX(trip_distance) AS distance_max\n" +
+                    "  FROM trip_data\n" +
+                    "  WHERE trip_distance > 0 AND total_amount > 0\n" +
+                    "  GROUP BY RatecodeID  ORDER BY revenu_total DESC",
+                    r5, R5_ALIASES, r5Ms, null);
+
+            showQuery(6,
+                    "SELECT VendorID, trip_distance AS distance, fare_amount AS tarif,\n" +
+                    "         tip_amount AS pourboire, total_amount AS total\n" +
+                    "  FROM trip_data\n" +
+                    "  ORDER BY tip_amount DESC LIMIT 10",
+                    s3, S3_ALIASES, s3Ms, null);
+
             // ── EXPORT ───────────────────────────────────────────────────────
+            writePythonScript(demoDir.resolve("plot_benchmark.py"));
             Files.writeString(demoDir.resolve("benchmark.csv"),
                     String.join("\n", benchLines) + "\n",
                     StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
@@ -393,15 +490,18 @@ public class BenchmarkDemo {
             writeCsv(demoDir.resolve("requete2_resultats.csv"), r2, R2_ALIASES);
             writeCsv(demoDir.resolve("requete3_resultats.csv"), r3, R3_ALIASES);
             writeCsv(demoDir.resolve("requete4_resultats.csv"), r4, R4_ALIASES);
+            writeCsv(demoDir.resolve("requete5_resultats.csv"), r5, R5_ALIASES);
 
             System.out.println();
             sep('═', "EXPORT  →  target/demo/");
             System.out.printf("  benchmark.csv           (%d paliers)%n", scales.size());
+            System.out.println("  plot_benchmark.py       → python plot_benchmark.py  (génère benchmark_graphs.png)");
             System.out.println("  BENCHMARK_TRACE.md      (traçabilité complète — racine du projet)");
             System.out.println("  requete1_resultats.csv");
             System.out.println("  requete2_resultats.csv");
             System.out.printf("  requete3_resultats.csv  (%d zones au total)%n", r3.size());
             System.out.println("  requete4_resultats.csv");
+            System.out.printf("  requete5_resultats.csv  (%d types de tarif)%n", r5.size());
 
             System.out.println();
             System.out.println("  ╔══════════════════════════════════════════╗");
@@ -583,6 +683,54 @@ public class BenchmarkDemo {
         }
         Files.writeString(file, sb.toString(),
                 StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+    }
+
+    private static void writePythonScript(Path dest) throws IOException {
+        String py = """
+import pandas as pd
+import matplotlib.pyplot as plt
+import os
+
+csv_path = os.path.join(os.path.dirname(__file__), 'benchmark.csv')
+df = pd.read_csv(csv_path)
+df['M'] = df['lignes'] / 1_000_000
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+fig.suptitle('FastBase — Benchmark NYC Yellow Taxi (~70 M lignes)', fontsize=14, fontweight='bold')
+
+# ── Graphique 1 : Temps (ms) de chaque requête GROUP BY ──────────────────────
+ax = axes[0]
+for col, lbl, mk in [
+    ('R1_ms', 'R1 GROUP BY payment_type',      'o'),
+    ('R2_ms', 'R2 GROUP BY passenger_count',   's'),
+    ('R3_ms', 'R3 GROUP BY DOLocationID',      '^'),
+    ('R4_ms', 'R4 GROUP BY payment_type SUM',  'D'),
+    ('R5_ms', 'R5 GROUP BY RatecodeID (WHERE)','x'),
+]:
+    ax.plot(df['M'], df[col], marker=mk, label=lbl)
+ax.set_title('Temps d\\'exécution des requêtes GROUP BY')
+ax.set_xlabel('Nombre de lignes (M)')
+ax.set_ylabel('Temps (ms)')
+ax.legend(fontsize=7)
+ax.grid(True, alpha=0.3)
+
+# ── Graphique 2 : Temps de chargement Parquet ────────────────────────────────
+ax = axes[1]
+ax.plot(df['M'], df['LOAD_ms'] / 1000, marker='o', color='purple')
+ax.set_title('Chargement Parquet cumulé')
+ax.set_xlabel('Nombre de lignes (M)')
+ax.set_ylabel('Temps cumulé (s)')
+ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+out_png = os.path.join(os.path.dirname(__file__), 'benchmark_graphs.png')
+out_svg = os.path.join(os.path.dirname(__file__), 'benchmark_graphs.svg')
+plt.savefig(out_png, dpi=150, bbox_inches='tight')
+plt.savefig(out_svg, bbox_inches='tight')
+print(f"Graphiques générés :\\n  {out_png}\\n  {out_svg}")
+plt.show()
+""";
+        Files.writeString(dest, py, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
     }
 
     private static Map<String, String> aliases(String... pairs) {
