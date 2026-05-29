@@ -314,19 +314,20 @@ public class BenchmarkDemo {
             trace.println();
             trace.println("## Résultats par palier");
             trace.println();
-            trace.println("| Lignes | LOAD (ms) | R1 (ms) | R2 (ms) | R3 (ms) | R4 (ms) | R5 (ms) |");
-            trace.println("|-------:|----------:|--------:|--------:|--------:|--------:|--------:|");
+            trace.println("| Lignes | LOAD (ms) | R1 (ms) | R2 (ms) | R3 (ms) | R4 (ms) | R5 (ms) | S1 scan (ms) | S2 filtre (ms) | S3 top-10 (ms) |");
+            trace.println("|-------:|----------:|--------:|--------:|--------:|--------:|--------:|-------------:|---------------:|---------------:|");
 
             // ── CHARGEMENT INCRÉMENTAL + REQUÊTES ────────────────────────────
-            sep('═', "CHARGEMENT + EXÉCUTION DES REQUÊTES");
-            System.out.printf("  %-14s  %-10s  %-9s  %-9s  %-9s  %-9s  %-9s%n",
-                    "Lignes total", "LOAD", "R1 (ms)", "R2 (ms)", "R3 (ms)", "R4 (ms)", "R5 (ms)");
-            System.out.println("  " + "─".repeat(82));
+            sep('═', "CHARGEMENT + REQUÊTES GROUP BY  │  SCAN");
+            System.out.printf("  %-14s  %-10s  %-6s  %-6s  %-6s  %-6s  %-6s  │  %-8s  %-9s  %-9s%n",
+                    "Lignes total", "LOAD (ms)", "R1", "R2", "R3", "R4", "R5",
+                    "S1 scan", "S2 filtre", "S3 top-10");
+            System.out.println("  " + "─".repeat(100));
 
             tables.createTable(tableName, new ArrayList<>(SCHEMA));
 
             List<String> benchLines = new ArrayList<>();
-            benchLines.add("lignes,LOAD_ms,R1_ms,R2_ms,R3_ms,R4_ms,R5_ms,S1_ms,S2_ms");
+            benchLines.add("lignes,LOAD_ms,R1_ms,R2_ms,R3_ms,R4_ms,R5_ms,S1_ms,S2_ms,S3_ms");
 
             int  prevScale = 0;
             long totalLoadMs = 0;
@@ -339,9 +340,6 @@ public class BenchmarkDemo {
             List<Map<String, Object>> r5 = Collections.emptyList();
             List<Map<String, Object>> s3 = Collections.emptyList();
             long s1Ms = 0, s2Ms = 0, s3Ms = 0;
-            long s1Count = 0, s2Count = 0;
-            List<String> selectConsoleLines = new ArrayList<>();
-            List<String> selectTraceLines  = new ArrayList<>();
 
             for (int scale : scales) {
                 int delta = scale - prevScale;
@@ -362,39 +360,31 @@ public class BenchmarkDemo {
                 tq = System.nanoTime(); r5 = query.execute(tableName, R5_COLS, R5_WHERE, R5_GROUPBY, R5_ORDERBY, R5_DIR, null); r5Ms = (System.nanoTime()-tq)/1_000_000; totalR5Ms += r5Ms;
 
                 // ── SELECT benchmarks ─────────────────────────────────────
-                tq = System.nanoTime(); s1Count = query.scanSelectCount(tableName, S1_COLS, null);         s1Ms = (System.nanoTime()-tq)/1_000_000;
-                tq = System.nanoTime(); s2Count = query.scanSelectCount(tableName, S2_COLS, S2_WHERE);     s2Ms = (System.nanoTime()-tq)/1_000_000;
+                tq = System.nanoTime(); query.scanSelectCount(tableName, S1_COLS, null);         s1Ms = (System.nanoTime()-tq)/1_000_000;
+                tq = System.nanoTime(); query.scanSelectCount(tableName, S2_COLS, S2_WHERE);     s2Ms = (System.nanoTime()-tq)/1_000_000;
                 tq = System.nanoTime(); s3 = query.execute(tableName, S3_COLS, null, null, S3_ORDERBY, S3_DIR, S3_LIMIT); s3Ms = (System.nanoTime()-tq)/1_000_000;
-                selectConsoleLines.add(String.format("  %,14d  %6d ms   %7d ms   %6d ms   (%,d / %,d lignes)",
-                        actual, s1Ms, s2Ms, s3Ms, s1Count, s2Count));
-                selectTraceLines.add(String.format("| %,d | %d | %d | %d | %,d | %,d |",
-                        actual, s1Ms, s2Ms, s3Ms, s1Count, s2Count));
 
-                System.out.printf("  %,14d  %7d ms  %6d     %6d     %6d     %6d     %6d%s%n",
+                System.out.printf("  %,14d  %7d ms  %5d   %5d   %5d   %5d   %5d   │  %5d ms   %5d ms   %5d ms%s%n",
                         actual, totalLoadMs, totalR1Ms, totalR2Ms, totalR3Ms, totalR4Ms, totalR5Ms,
+                        s1Ms, s2Ms, s3Ms,
                         eof ? "  ← FIN DU FICHIER" : "");
 
-                trace.printf("| %,d | %d | %d | %d | %d | %d | %d |%n",
-                        actual, totalLoadMs, totalR1Ms, totalR2Ms, totalR3Ms, totalR4Ms, totalR5Ms);
+                trace.printf("| %,d | %d | %d | %d | %d | %d | %d | %d | %d | %d |%n",
+                        actual, totalLoadMs, totalR1Ms, totalR2Ms, totalR3Ms, totalR4Ms, totalR5Ms,
+                        s1Ms, s2Ms, s3Ms);
                 trace.flush();
 
-                benchLines.add(String.format("%d,%d,%d,%d,%d,%d,%d,%d,%d",
-                    actual, totalLoadMs, totalR1Ms, totalR2Ms, totalR3Ms, totalR4Ms, totalR5Ms, s1Ms, s2Ms));
+                benchLines.add(String.format("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                    actual, totalLoadMs, totalR1Ms, totalR2Ms, totalR3Ms, totalR4Ms, totalR5Ms,
+                    s1Ms, s2Ms, s3Ms));
                 prevScale = actual;
                 if (eof) break;
             }
 
-            // ── BENCHMARK SELECT (console) ────────────────────────────────
             System.out.println();
-            sep('═', "BENCHMARK SELECT (scan / filtre / TOP-N)");
-            System.out.printf("  %-14s  %-12s  %-14s  %-14s%n",
-                    "Lignes total", "S1 scan (ms)", "S2 filtre (ms)", "S3 top-10 (ms)");
-            System.out.println("  " + "─".repeat(72));
-            for (String line : selectConsoleLines) System.out.println(line);
-            System.out.println();
-            System.out.println("  S1 : SELECT fare_amount, trip_distance, tip_amount          (scan complet, sans matérialisation)");
-            System.out.println("  S2 : SELECT ... WHERE fare_amount > 10 AND tip_amount > 0   (filtre composé AND)");
-            System.out.println("  S3 : SELECT ... ORDER BY tip_amount DESC LIMIT 10           (top-N, zéro copie hors top-10)");
+            System.out.println("  Légende scan  │  S1 : scan complet 3 colonnes (sans matérialisation)");
+            System.out.println("                │  S2 : filtre WHERE fare_amount > 10 AND tip_amount > 0");
+            System.out.println("                │  S3 : ORDER BY tip_amount DESC LIMIT 10 (heap top-N)");
 
             // ── RÉSUMÉ TRACE ──────────────────────────────────────────────
             trace.println();
@@ -417,15 +407,11 @@ public class BenchmarkDemo {
             trace.println();
             trace.println("---");
             trace.println();
-            trace.println("## Benchmark SELECT (dernière échelle)");
+            trace.println("## Légende scan (colonnes S1 / S2 / S3 du tableau ci-dessus)");
             trace.println();
-            trace.println("| Lignes | S1 scan (ms) | S2 filtre (ms) | S3 top-10 (ms) | S1 lignes | S2 filtrées |");
-            trace.println("|-------:|-------------:|---------------:|---------------:|----------:|------------:|");
-            for (String line : selectTraceLines) { trace.println(line); }
-            trace.println();
-            trace.println("- **S1** : `SELECT fare_amount, trip_distance, tip_amount` — scan complet sans matérialisation (`scanSelectCount`)");
+            trace.println("- **S1** : `SELECT fare_amount, trip_distance, tip_amount` — scan complet, sans matérialisation (`scanSelectCount`)");
             trace.println("- **S2** : `SELECT ... WHERE fare_amount > 10 AND tip_amount > 0` — filtre AND composé");
-            trace.println("- **S3** : `SELECT ... ORDER BY tip_amount DESC LIMIT 10` — top-N via PriorityQueue O(n log 10)");
+            trace.println("- **S3** : `SELECT ... ORDER BY tip_amount DESC LIMIT 10` — top-N via heap O(n log 10)");
             trace.println();
             trace.println("---");
             trace.println();
@@ -695,30 +681,41 @@ csv_path = os.path.join(os.path.dirname(__file__), 'benchmark.csv')
 df = pd.read_csv(csv_path)
 df['M'] = df['lignes'] / 1_000_000
 
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+fig, axes = plt.subplots(1, 3, figsize=(20, 5))
 fig.suptitle('FastBase — Benchmark NYC Yellow Taxi (~70 M lignes)', fontsize=14, fontweight='bold')
 
-# ── Graphique 1 : Temps (ms) de chaque requête GROUP BY ──────────────────────
+# ── Graphique 1 : Temps GROUP BY par palier ───────────────────────────────────
 ax = axes[0]
 for col, lbl, mk in [
     ('R1_ms', 'R1 GROUP BY payment_type',      'o'),
-    ('R2_ms', 'R2 GROUP BY passenger_count',   's'),
-    ('R3_ms', 'R3 GROUP BY DOLocationID',      '^'),
+    ('R2_ms', 'R2 WHERE + GROUP BY passenger', 's'),
+    ('R3_ms', 'R3 WHERE + GROUP BY DOLocation','^'),
     ('R4_ms', 'R4 GROUP BY payment_type SUM',  'D'),
     ('R5_ms', 'R5 GROUP BY RatecodeID (WHERE)','x'),
 ]:
     ax.plot(df['M'], df[col], marker=mk, label=lbl)
-ax.set_title('Temps d\\'exécution des requêtes GROUP BY')
-ax.set_xlabel('Nombre de lignes (M)')
-ax.set_ylabel('Temps (ms)')
+ax.set_title('Requêtes GROUP BY')
+ax.set_xlabel('Lignes (M)')
+ax.set_ylabel('Temps cumulé (ms)')
 ax.legend(fontsize=7)
 ax.grid(True, alpha=0.3)
 
-# ── Graphique 2 : Temps de chargement Parquet ────────────────────────────────
+# ── Graphique 2 : Temps SCAN par palier ──────────────────────────────────────
 ax = axes[1]
-ax.plot(df['M'], df['LOAD_ms'] / 1000, marker='o', color='purple')
+ax.plot(df['M'], df['S1_ms'], marker='o', color='steelblue',  linewidth=2, label='S1 scan complet (3 cols)')
+ax.plot(df['M'], df['S2_ms'], marker='s', color='darkorange', linewidth=2, label='S2 filtre WHERE AND')
+ax.plot(df['M'], df['S3_ms'], marker='^', color='seagreen',   linewidth=2, label='S3 ORDER BY LIMIT 10')
+ax.set_title('Scan / Filtre / TOP-N')
+ax.set_xlabel('Lignes (M)')
+ax.set_ylabel('Temps (ms)')
+ax.legend(fontsize=8)
+ax.grid(True, alpha=0.3)
+
+# ── Graphique 3 : Chargement Parquet cumulé ──────────────────────────────────
+ax = axes[2]
+ax.plot(df['M'], df['LOAD_ms'] / 1000, marker='o', color='purple', linewidth=2)
 ax.set_title('Chargement Parquet cumulé')
-ax.set_xlabel('Nombre de lignes (M)')
+ax.set_xlabel('Lignes (M)')
 ax.set_ylabel('Temps cumulé (s)')
 ax.grid(True, alpha=0.3)
 
