@@ -4,8 +4,8 @@ target/
 !**/src/main/**/target/
 !**/src/test/**/target/
 
-### Claude ###
-CLAUDE.md
+### Markdown — tous les .md exclus du depot ###
+*.md
 **/CLAUDE.md
 
 ### STS ###
